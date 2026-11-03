@@ -4,5 +4,5 @@
 // JANGAN letak kunci "secret" / "service_role" di sini.
 window.PELAN_CONFIG = {
   supabaseUrl: "https://uctfvajhjggahyffxnrz.supabase.co",
-  supabaseKey: ""
+  supabaseKey: "sb_publishable_XMYAMMnElDDLwo3_C_KnlA_xLaSi1bW"
 };

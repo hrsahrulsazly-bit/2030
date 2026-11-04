@@ -286,6 +286,50 @@ function monthOut(S, today) {
   return { spent, pending, total: spent + pending, received, byCat, cardSpend: sum(cardSpend, t => t.amount) };
 }
 
+// Ringkasan setahun (year = 0 → semua tahun). Pendapatan: bagi setiap bulan yang ada rekod (dan bulan semasa), guna jumlah
+// "Masuk" sebenar; jika tiada, guna pendapatan bulanan dirancang.
+function yearSummary(S, year, today) {
+  const Y = String(year), curYM = ym(today);
+  const all = !Number(year);
+  const inY = t => all || String(t.date).slice(0, 4) === Y;
+  const txOut = S.tx.filter(t => t.type === "out" && inY(t) && t.cat !== "Kad kredit");
+  const cardSpend = S.cardTx.filter(t => t.type === "belanja" && inY(t));
+  const txIn = S.tx.filter(t => t.type === "in" && inY(t));
+  const byCat = {};
+  for (const t of [...txOut, ...cardSpend]) { const c = String(t.cat || "Lain-lain").trim() || "Lain-lain"; byCat[c] = (byCat[c] || 0) + (Number(t.amount) || 0); }
+  const months = new Set([...txOut, ...cardSpend, ...txIn].map(t => String(t.date).slice(0, 7)));
+  const incCurrent = all || Number(year) === today.getFullYear();
+  if (incCurrent) months.add(curYM);
+  const planned = sum(S.incomes, i => i.amount);
+  let income = 0;
+  for (const m of months) {
+    const rec = sum(txIn.filter(t => String(t.date).slice(0, 7) === m), t => t.amount);
+    income += rec > 0 ? rec : planned;
+  }
+  const spent = sum(txOut, t => t.amount) + sum(cardSpend, t => t.amount);
+  const pending = incCurrent ? monthOut(S, today).pending : 0;
+  return { income, spent, pending, balance: income - spent - pending, byCat, months: months.size, received: sum(txIn, t => t.amount) };
+}
+
+// Aliran sebulan, sama definisi dengan ringkasan: masuk = transaksi Masuk; keluar = transaksi Keluar
+// (kecuali bayaran bil kad) + belanja kad kredit.
+function monthFlow(S, m) {
+  const inM = t => String(t.date).slice(0, 7) === m;
+  return {
+    m,
+    in: sum(S.tx.filter(t => t.type === "in" && inM(t)), t => t.amount),
+    out: sum(S.tx.filter(t => t.type === "out" && inM(t) && t.cat !== "Kad kredit"), t => t.amount)
+       + sum(S.cardTx.filter(t => t.type === "belanja" && inM(t)), t => t.amount)
+  };
+}
+// sel: "6" / "12" = bulan terakhir; "2027" = Jan–Dis tahun itu.
+function trendMonths(sel, today) {
+  if (/^\d{4}$/.test(String(sel))) return Array.from({ length: 12 }, (_, i) => sel + "-" + String(i + 1).padStart(2, "0"));
+  const n = Number(sel) || 6, out = [];
+  for (let i = n - 1; i >= 0; i--) out.push(ym(new Date(today.getFullYear(), today.getMonth() - i, 1)));
+  return out;
+}
+
 // Item bayaran berulang (komitmen, hutang aktif, kad dengan baki) untuk kalendar.
 function billItems(S, today) {
   return [
@@ -382,7 +426,8 @@ const today = () => new Date();
 let S = load();
 let tab = (() => { try { return localStorage.getItem(KEY + ":tab") || "ringkasan"; } catch { return "ringkasan"; } })();
 let txMonth = ym(today());
-let trendN = 6;
+let trendSel = "6";
+let sumYear = new Date().getFullYear();
 
 function load() {
   try { return normalize(JSON.parse(localStorage.getItem(KEY))); } catch { return normalize(null); }
@@ -653,9 +698,9 @@ function nextSteps(c) {
 /* ---------- tab ---------- */
 function vRingkasan() {
   const c = calc(S), t = today();
-  const mo = monthOut(S, t);
-  const incomeM = Math.max(c.income, mo.received);
-  const baki = incomeM - mo.total;
+  const ys = yearSummary(S, sumYear, t);
+  const tdata = trendMonths(trendSel, t).map(m => monthFlow(S, m));
+  const years = [...new Set([2026, 2027, 2028, 2029, 2030, t.getFullYear(), ...S.tx.map(x => +String(x.date).slice(0, 4)), ...S.cardTx.map(x => +String(x.date).slice(0, 4))])].filter(y => y > 2000).sort();
   const days = Math.max(0, Math.ceil((END - t) / 86400000));
   const yr = t.getFullYear();
   const stamps = [2026, 2027, 2028, 2029, 2030].map(y => `<span class="stamp ${y === yr ? "now" : y < yr ? "past" : ""}">${y}</span>`).join("");
@@ -675,14 +720,16 @@ function vRingkasan() {
   </section>
 
   <section class="card">
-    <div class="row between"><h2>Bulan ini</h2>${dsrPill(c)}</div>
+    <div class="row between"><h2>Ringkasan ${sumYear || "2026–2030"}</h2>
+      <select data-act="sumyear" aria-label="Pilih tahun" style="width:auto"><option value="0" ${sumYear ? "" : "selected"}>Semua tahun</option>${years.map(y => `<option value="${y}" ${y === sumYear ? "selected" : ""}>Tahun ${y}</option>`).join("")}</select></div>
+    <div class="row between small muted" style="margin:-2px 0 8px"><span>${ys.months} bulan direkod</span>${dsrPill(c)}</div>
     <div class="grid3">
-      <div class="stat"><span>Pendapatan</span><b>${RM(incomeM)}</b>${mo.received && c.income ? `<span>Diterima ${RM(mo.received)}</span>` : ""}</div>
-      <div class="stat"><span>Duit keluar</span><b class="${mo.spent ? "neg" : ""}">${RM(mo.spent)}</b>${mo.pending ? `<span>+ ${RM(mo.pending)} komitmen belum bayar</span>` : ""}</div>
-      <div class="stat"><span>${mo.pending ? "Baki dijangka" : "Baki"}</span><b class="${baki >= 0 ? "pos" : "neg"}">${RM(baki)}</b></div>
+      <div class="stat"><span>Pendapatan</span><b>${RM(ys.income)}</b></div>
+      <div class="stat"><span>Duit keluar</span><b class="${ys.spent ? "neg" : ""}">${RM(ys.spent)}</b>${ys.pending ? `<span>+ ${RM(ys.pending)} komitmen bulan ini belum bayar</span>` : ""}</div>
+      <div class="stat"><span>${ys.pending ? "Baki dijangka" : "Baki"}</span><b class="${ys.balance >= 0 ? "pos" : "neg"}">${RM(ys.balance)}</b></div>
     </div>
-    ${Object.keys(mo.byCat).length ? `<h3 style="margin-top:14px">Duit keluar ikut kategori</h3>
-    <ul class="list">${Object.entries(mo.byCat).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<li style="padding:6px 0"><div class="grow">${esc(n)}<div class="bar" style="margin-top:4px;height:6px"><i style="width:${(v / mo.spent * 100).toFixed(1)}%;background:var(--red)"></i></div></div><span class="num">${RM(v)}</span></li>`).join("")}</ul>` : ""}
+    ${Object.keys(ys.byCat).length ? `<h3 style="margin-top:14px">Duit keluar ikut kategori</h3>
+    <ul class="list">${Object.entries(ys.byCat).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<li style="padding:6px 0"><div class="grow">${esc(n)}<div class="bar" style="margin-top:4px;height:6px"><i style="width:${(v / ys.spent * 100).toFixed(1)}%;background:var(--red)"></i></div></div><span class="num">${RM(v)}</span></li>`).join("")}</ul>` : `<p class="empty">Tiada duit keluar direkod${sumYear ? " untuk " + sumYear : ""}.</p>`}
     <h3 style="margin-top:14px">Campuran pendapatan</h3>
     <div class="mix" aria-hidden="true">${["aktif", "sampingan", "pasif"].map(k => `<i style="width:${c.mix[k] / mixT * 100}%;background:${MIXC[k]}"></i>`).join("")}</div>
     <div class="row small" style="margin-top:6px">${["aktif", "sampingan", "pasif"].map(k => `<span><span style="color:${MIXC[k]}">■</span> ${k[0].toUpperCase() + k.slice(1)} ${RM(c.mix[k])}</span>`).join("")}</div>
@@ -701,8 +748,13 @@ function vRingkasan() {
 
   <section class="card">
     <div class="row between"><h2>Trend</h2>
-      <div class="row"><button class="sm" data-act="trend" data-n="6" aria-pressed="${trendN === 6}">6 bln</button><button class="sm" data-act="trend" data-n="12" aria-pressed="${trendN === 12}">12 bln</button></div></div>
-    ${chart(trend(S.tx, t, trendN))}
+      <select data-act="trendsel" aria-label="Tempoh trend" style="width:auto">
+        <option value="6" ${trendSel === "6" ? "selected" : ""}>6 bulan terakhir</option>
+        <option value="12" ${trendSel === "12" ? "selected" : ""}>12 bulan terakhir</option>
+        ${years.map(y => `<option value="${y}" ${trendSel === String(y) ? "selected" : ""}>Tahun ${y}</option>`).join("")}
+      </select></div>
+    ${chart(tdata)}
+    <p class="small muted" style="margin:.4rem 0 0">Jumlah: masuk ${RM(sum(tdata, d => d.in))} · keluar ${RM(sum(tdata, d => d.out))}</p>
   </section>
 
   <section class="card">
@@ -1180,7 +1232,6 @@ document.addEventListener("click", e => {
       if (b.dataset.kind === "hutang") { const d = S.debts.find(x => x.id === id); if (d) d.balance = Math.max(0, num(d.balance) - amt); }
       toast("Direkod sebagai transaksi"); commit(); break;
     }
-    case "trend": trendN = num(b.dataset.n); render(); break;
     case "goaltpl": {
       const have = new Set(S.goals.map(g => g.title));
       GOAL_TPL.forEach(([year, area, title]) => { if (!have.has(title)) S.goals.push({ id: uid(), year, area, title, done: false }); });
@@ -1220,6 +1271,8 @@ document.addEventListener("change", e => {
   }
   const act = el.dataset.act; if (!act) return;
   if (act === "txmonth") { txMonth = el.value; render(); }
+  if (act === "sumyear") { sumYear = num(el.value); render(); }
+  if (act === "trendsel") { trendSel = el.value; render(); }
   if (act === "cardmonth") { cardMonth = el.value; render(); }
   if (act === "notifydays") { S.settings.notifyDays = num(el.value); commit(); }
   if (act === "cardfilter") { cardFilter = el.value; render(); }

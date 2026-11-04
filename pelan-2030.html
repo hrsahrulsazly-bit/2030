@@ -267,6 +267,25 @@ function emergencyCalc(S, today) {
   return { s1, s2, stage };
 }
 
+// Semua duit keluar bulan ini: transaksi keluar (kecuali bayaran bil kad — belanja kad sudah dikira)
+// + belanja kad kredit; serta komitmen/hutang bulan ini yang belum ditanda "Dah bayar".
+function monthOut(S, today) {
+  const k = ym(today);
+  const inMonth = t => String(t.date).slice(0, 7) === k;
+  const txOut = S.tx.filter(t => t.type === "out" && inMonth(t) && t.cat !== "Kad kredit");
+  const cardSpend = S.cardTx.filter(t => t.type === "belanja" && inMonth(t));
+  const byCat = {};
+  for (const t of [...txOut, ...cardSpend]) { const c = String(t.cat || "Lain-lain").trim() || "Lain-lain"; byCat[c] = (byCat[c] || 0) + (Number(t.amount) || 0); }
+  const pendingItems = [
+    ...S.commitments.map(c => ({ id: c.id, amount: Number(c.amount) || 0 })),
+    ...S.debts.filter(d => (Number(d.balance) || 0) > 0).map(d => ({ id: d.id, amount: Number(d.payment) || 0 }))
+  ].filter(i => !S.paid[i.id + ":" + k]);
+  const spent = sum(txOut, t => t.amount) + sum(cardSpend, t => t.amount);
+  const pending = sum(pendingItems, i => i.amount);
+  const received = sum(S.tx.filter(t => t.type === "in" && inMonth(t)), t => t.amount);
+  return { spent, pending, total: spent + pending, received, byCat, cardSpend: sum(cardSpend, t => t.amount) };
+}
+
 // Item bayaran berulang (komitmen, hutang aktif, kad dengan baki) untuk kalendar.
 function billItems(S, today) {
   return [
@@ -423,7 +442,7 @@ function downloadICS() {
 const CFG = window.PELAN_CONFIG || {};
 let cloudConfigured = !!(CFG.supabaseUrl && CFG.supabaseKey);
 let sb = null, sbUser = null, syncMsg = "", pushT = null;
-let plan = null, members = [], channel = null, syncing = false, syncAgain = false, shareOpen = false;
+let plan = null, members = [], channel = null, syncing = false, syncAgain = false, shareOpen = false, loginErr = "";
 document.addEventListener("toggle", e => { if (e.target.id === "shareBox") shareOpen = e.target.open; }, true);
 const BASEKEY = KEY + ":base";
 function setSync(msg) {
@@ -568,7 +587,7 @@ async function initCloud() {
     const changed = (u && u.id) !== (sbUser && sbUser.id);
     sbUser = u;
     if (changed) {
-      plan = null; members = [];
+      plan = null; members = []; loginErr = "";
       if (channel) { sb.removeChannel(channel); channel = null; }
       render(); if (u) setTimeout(syncNow, 0);
     }
@@ -634,6 +653,9 @@ function nextSteps(c) {
 /* ---------- tab ---------- */
 function vRingkasan() {
   const c = calc(S), t = today();
+  const mo = monthOut(S, t);
+  const incomeM = Math.max(c.income, mo.received);
+  const baki = incomeM - mo.total;
   const days = Math.max(0, Math.ceil((END - t) / 86400000));
   const yr = t.getFullYear();
   const stamps = [2026, 2027, 2028, 2029, 2030].map(y => `<span class="stamp ${y === yr ? "now" : y < yr ? "past" : ""}">${y}</span>`).join("");
@@ -655,10 +677,12 @@ function vRingkasan() {
   <section class="card">
     <div class="row between"><h2>Bulan ini</h2>${dsrPill(c)}</div>
     <div class="grid3">
-      ${stat("Pendapatan", RM(c.income))}
-      ${stat("Komitmen + hutang", RM(c.out))}
-      ${stat("Baki", RM(c.balance), c.balance >= 0 ? "pos" : "neg")}
+      <div class="stat"><span>Pendapatan</span><b>${RM(incomeM)}</b>${mo.received && c.income ? `<span>Diterima ${RM(mo.received)}</span>` : ""}</div>
+      <div class="stat"><span>Duit keluar</span><b class="${mo.spent ? "neg" : ""}">${RM(mo.spent)}</b>${mo.pending ? `<span>+ ${RM(mo.pending)} komitmen belum bayar</span>` : ""}</div>
+      <div class="stat"><span>${mo.pending ? "Baki dijangka" : "Baki"}</span><b class="${baki >= 0 ? "pos" : "neg"}">${RM(baki)}</b></div>
     </div>
+    ${Object.keys(mo.byCat).length ? `<h3 style="margin-top:14px">Duit keluar ikut kategori</h3>
+    <ul class="list">${Object.entries(mo.byCat).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<li style="padding:6px 0"><div class="grow">${esc(n)}<div class="bar" style="margin-top:4px;height:6px"><i style="width:${(v / mo.spent * 100).toFixed(1)}%;background:var(--red)"></i></div></div><span class="num">${RM(v)}</span></li>`).join("")}</ul>` : ""}
     <h3 style="margin-top:14px">Campuran pendapatan</h3>
     <div class="mix" aria-hidden="true">${["aktif", "sampingan", "pasif"].map(k => `<i style="width:${c.mix[k] / mixT * 100}%;background:${MIXC[k]}"></i>`).join("")}</div>
     <div class="row small" style="margin-top:6px">${["aktif", "sampingan", "pasif"].map(k => `<span><span style="color:${MIXC[k]}">■</span> ${k[0].toUpperCase() + k.slice(1)} ${RM(c.mix[k])}</span>`).join("")}</div>
@@ -697,9 +721,24 @@ function vRingkasan() {
   </section>`;
 }
 
+// Pemilih bulan: "Semua bulan" + bulan yang ada rekod (terbaru dahulu) + bulan semasa.
+function monthSelect(act, value, dates) {
+  const ms = [...new Set([ym(today()), ...dates.map(d => String(d).slice(0, 7)).filter(m => /^\d{4}-\d{2}$/.test(m)), ...(value ? [value] : [])])].sort().reverse();
+  return `<select data-act="${act}" aria-label="Tapis bulan" style="width:auto">
+    <option value="" ${value ? "" : "selected"}>Semua bulan</option>
+    ${ms.map(m => `<option value="${m}" ${m === value ? "selected" : ""}>${fmtYM(m)}</option>`).join("")}
+  </select>`;
+}
+// Senarai dengan tajuk bulan apabila "Semua bulan" dipilih.
+const withMonthHeads = (rows, all, item) => rows.map((r, i) => {
+  const m = String(r.date).slice(0, 7);
+  const head = all && (i === 0 || String(rows[i - 1].date).slice(0, 7) !== m) ? `<li class="small muted" style="padding-top:14px;font-weight:600">${fmtYM(m)}</li>` : "";
+  return head + item(r);
+}).join("");
+
 function vKewangan() {
   const c = calc(S), t = today();
-  const rows = S.tx.filter(x => String(x.date).slice(0, 7) === txMonth).sort((a, b) => b.date.localeCompare(a.date));
+  const rows = S.tx.filter(x => !txMonth || String(x.date).slice(0, 7) === txMonth).sort((a, b) => b.date.localeCompare(a.date));
   const tin = sum(rows.filter(r => r.type === "in"), r => r.amount), tout = sum(rows.filter(r => r.type === "out"), r => r.amount);
   const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
   const { s1, s2, stage } = emergencyCalc(S, t);
@@ -718,10 +757,11 @@ function vKewangan() {
   </section>
 
   <section class="card">
-    <div class="row between"><h2>Transaksi</h2><input type="month" value="${txMonth}" data-act="txmonth" aria-label="Bulan" style="width:auto"></div>
+    <div class="row between"><h2>Transaksi</h2>${monthSelect("txmonth", txMonth, S.tx.map(t => t.date))}</div>
+    ${txMonth ? "" : `<p class="small muted" style="margin:0 0 6px">Semua bulan · ${rows.length} transaksi</p>`}
     <div class="grid3">${stat("Masuk", RM(tin), "pos")}${stat("Keluar", RM(tout), "neg")}${stat("Bersih", RM(tin - tout), tin - tout >= 0 ? "pos" : "neg")}</div>
-    ${rows.length ? `<ul class="list" style="margin-top:8px">${rows.map(r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}</div></div>
-      <span class="num ${r.type === "in" ? "pos" : "neg"}">${r.type === "in" ? "+" : "−"}${RM(r.amount)}</span>${del("tx", r.id)}</li>`).join("")}</ul>` : `<p class="empty">Tiada transaksi untuk ${fmtYM(txMonth)}.</p>`}
+    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !txMonth, r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}</div></div>
+      <span class="num ${r.type === "in" ? "pos" : "neg"}">${r.type === "in" ? "+" : "−"}${RM(r.amount)}</span>${del("tx", r.id)}</li>`)}</ul>` : `<p class="empty">${txMonth ? "Tiada transaksi untuk " + fmtYM(txMonth) : "Belum ada transaksi"}.</p>`}
     <form class="add" data-form="tx">
       <label>Tarikh<input name="date" type="date" value="${ymd(t)}" required></label>
       <label>Jenis<select name="type"><option value="out">Keluar</option><option value="in">Masuk</option></select></label>
@@ -787,7 +827,7 @@ function vKad() {
   const cards = S.cards.map(c => ({ c, k: cardCalc(S, c, t) }));
   const totBal = sum(cards, x => x.k.balance), totLim = sum(cards, x => x.k.limit);
   const totUtil = totLim > 0 ? totBal / totLim * 100 : 0;
-  const rows = S.cardTx.filter(x => String(x.date).slice(0, 7) === cardMonth && (!cardFilter || x.cardId === cardFilter)).sort((a, b) => b.date.localeCompare(a.date));
+  const rows = S.cardTx.filter(x => (!cardMonth || String(x.date).slice(0, 7) === cardMonth) && (!cardFilter || x.cardId === cardFilter)).sort((a, b) => b.date.localeCompare(a.date));
   const mSpend = sum(rows.filter(r => r.type === "belanja"), r => r.amount), mPaid = sum(rows.filter(r => r.type === "bayar"), r => r.amount);
   const cname = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
   const lvl = l => l === "sihat" ? "ok" : l === "tinggi" ? "bad" : "warn";
@@ -828,11 +868,11 @@ function vKad() {
     <datalist id="cardcats">${CARD_CATS.map(x => `<option value="${x}">`).join("")}</datalist>
     <div class="row between" style="margin-top:14px">
       <select data-act="cardfilter" aria-label="Tapis kad" style="width:auto"><option value="">Semua kad</option>${S.cards.map(c => `<option value="${c.id}" ${c.id === cardFilter ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
-      <input type="month" value="${cardMonth}" data-act="cardmonth" aria-label="Bulan" style="width:auto">
+      ${monthSelect("cardmonth", cardMonth, S.cardTx.map(t => t.date))}
     </div>
-    <div class="grid2" style="margin-top:8px">${stat("Belanja " + fmtYM(cardMonth), RM(mSpend), "neg")}${stat("Dibayar", RM(mPaid), "pos")}</div>
-    ${rows.length ? `<ul class="list" style="margin-top:8px">${rows.map(r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · ${esc(cname(r.cardId))}</div></div>
-      <span class="num ${r.type === "bayar" ? "pos" : r.type === "awal" ? "" : "neg"}">${r.type === "bayar" ? "−" : "+"}${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`).join("")}</ul>` : `<p class="empty">Tiada rekod untuk ${fmtYM(cardMonth)}.</p>`}
+    <div class="grid2" style="margin-top:8px">${stat("Belanja " + (cardMonth ? fmtYM(cardMonth) : "semua bulan"), RM(mSpend), "neg")}${stat("Dibayar", RM(mPaid), "pos")}</div>
+    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !cardMonth, r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · ${esc(cname(r.cardId))}</div></div>
+      <span class="num ${r.type === "bayar" ? "pos" : r.type === "awal" ? "" : "neg"}">${r.type === "bayar" ? "−" : "+"}${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`)}</ul>` : `<p class="empty">${cardMonth ? "Tiada rekod untuk " + fmtYM(cardMonth) : "Belum ada rekod"}.</p>`}
   </section>` : ""}`;
 }
 
@@ -989,6 +1029,7 @@ function vCloud() {
       <button class="primary" name="mode" value="masuk">Log masuk</button>
       <button name="mode" value="daftar">Daftar akaun baru</button>
     </form>
+    <p id="loginErr" class="small neg" role="alert" style="margin:.6rem 0 0" ${loginErr ? "" : "hidden"}>${loginErr}</p>
     <p class="small muted">Kali pertama? Tekan <b>Daftar akaun baru</b> di telefon pertama. Di telefon kedua, tekan <b>Log masuk</b> dengan e-mel dan kata laluan yang sama.</p>`;
   else {
     const owner = plan && plan.owner_id === sbUser.id;
@@ -1004,6 +1045,9 @@ function vCloud() {
     <p class="small muted" id="syncMsg">${esc(syncMsg)}</p>
     <div class="row"><button data-act="sync">Segerak sekarang</button><button data-act="logout">Log keluar</button></div>
     <p class="small muted" style="margin-top:10px">Di telefon lain, log masuk dengan e-mel dan kata laluan yang sama untuk lihat data yang sama.</p>
+    <details style="margin-top:8px"><summary>Tetapkan / tukar kata laluan</summary>
+      <form class="add" data-form="setpw" style="grid-template-columns:1fr auto"><input name="password" type="password" required minlength="6" autocomplete="new-password" placeholder="Kata laluan baru (min. 6)" aria-label="Kata laluan baru"><button class="primary">Simpan</button></form>
+    </details>
     <details id="shareBox" style="margin-top:8px" ${shareOpen || members.length || (plan && plan.owner_id !== sbUser.id) ? "open" : ""}><summary>Kongsi dengan e-mel lain (pilihan)</summary>${share}</details>`;
   }
   return `<section class="card"><h2>Penyegerakan awan</h2>${body}</section>`;
@@ -1048,6 +1092,13 @@ document.addEventListener("submit", e => {
   const f = e.target.closest("form[data-form]"); if (!f) return;
   e.preventDefault();
   const d = Object.fromEntries(new FormData(f));
+  if (f.dataset.form === "setpw") {
+    sb.auth.updateUser({ password: d.password }).then(({ error }) => {
+      if (error) toast(/same|different/i.test(error.message) ? "Kata laluan ini sudah digunakan" : "Gagal: " + error.message);
+      else { f.reset(); toast("Kata laluan disimpan. Guna e-mel + kata laluan ini di telefon lain."); }
+    });
+    return;
+  }
   if (f.dataset.form === "invite") { invite(d.email); f.reset(); return; }
   if (f.dataset.form === "login") {
     const mode = (e.submitter && e.submitter.value) || "masuk";
@@ -1055,23 +1106,29 @@ document.addEventListener("submit", e => {
     const cred = { email: d.email.trim().toLowerCase(), password: d.password };
     (mode === "daftar" ? sb.auth.signUp(cred) : sb.auth.signInWithPassword(cred))
       .then(({ data, error }) => {
+        let msg = "";
         if (error) {
           const m = error.message || "";
-          if (/invalid login credentials/i.test(m)) toast("E-mel atau kata laluan salah. Belum ada akaun? Tekan Daftar akaun baru.");
-          else if (/already registered|already exists/i.test(m)) toast("Akaun ini sudah wujud — tekan Log masuk.");
-          else if (/email not confirmed/i.test(m)) toast("E-mel belum disahkan. Semak e-mel, atau matikan 'Confirm email' di Supabase.");
-          else if (/password/i.test(m)) toast("Kata laluan terlalu lemah — guna sekurang-kurangnya 6 aksara.");
-          else toast("Gagal: " + m);
+          if (/invalid login credentials/i.test(m)) msg = "E-mel atau kata laluan salah. Jika telefon pertama dahulu log masuk guna <b>pautan e-mel</b>, akaun itu belum ada kata laluan — di telefon pertama buka Tetapan → <b>Tetapkan kata laluan</b>, kemudian cuba lagi di sini.";
+          else if (/already registered|already exists/i.test(m)) msg = "Akaun ini sudah wujud — tekan <b>Log masuk</b> (bukan Daftar).";
+          else if (/email not confirmed/i.test(m)) msg = "E-mel belum disahkan. Di Supabase → Authentication → Sign In / Providers → Email, matikan <b>Confirm email</b>, kemudian cuba lagi.";
+          else if (/weak|password should|at least/i.test(m)) msg = "Kata laluan terlalu lemah — guna sekurang-kurangnya 6 aksara.";
+          else if (/fetch|network/i.test(m)) msg = "Tiada sambungan internet ke Supabase. Semak internet dan cuba lagi.";
+          else msg = "Gagal log masuk: " + esc(m);
         } else if (mode === "daftar" && !data.session) {
-          toast("Akaun dicipta. Semak e-mel untuk sahkan, atau matikan 'Confirm email' di Supabase, kemudian Log masuk.");
-        } else toast("Berjaya log masuk");
+          msg = "Akaun dicipta tetapi perlu pengesahan e-mel. Matikan <b>Confirm email</b> di Supabase (Authentication → Sign In / Providers → Email), kemudian tekan Log masuk.";
+        }
+        loginErr = msg;
+        const el = document.getElementById("loginErr");
+        if (el) { el.innerHTML = msg; el.hidden = !msg; }
+        if (!msg) toast("Berjaya log masuk");
       })
-      .finally(() => btns.forEach(x => x.disabled = false));
+      .finally(() => f.isConnected && btns.forEach(x => x.disabled = false));
     return;
   }
   switch (f.dataset.form) {
     case "income": S.incomes.push({ id: uid(), name: d.name.trim(), type: d.type, amount: num(d.amount) }); break;
-    case "tx": S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() }); txMonth = d.date.slice(0, 7); break;
+    case "tx": S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() }); if (txMonth) txMonth = d.date.slice(0, 7); break;
     case "gold": Object.assign(S.gold, { have: num(d.have), target: num(d.target), price: num(d.price), by: d.by || S.gold.by }); toast("Disimpan"); break;
     case "emergency":
       Object.assign(S.asb, { have: num(d.asbHave), s1: num(d.s1), s1by: d.s1by || S.asb.s1by });
@@ -1088,7 +1145,7 @@ document.addEventListener("submit", e => {
       if (num(d.opening) > 0) S.cardTx.push({ id: uid(), cardId: card.id, date: ymd(today()), type: "awal", amount: num(d.opening), cat: "Baki awal", note: "" });
       break;
     }
-    case "cardtx": S.cardTx.push({ id: uid(), cardId: d.cardId, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() }); cardMonth = d.date.slice(0, 7); toast("Belanja kad direkod"); break;
+    case "cardtx": S.cardTx.push({ id: uid(), cardId: d.cardId, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() }); if (cardMonth) cardMonth = d.date.slice(0, 7); toast("Belanja kad direkod"); break;
     case "cardpay": {
       const card = S.cards.find(x => x.id === f.dataset.id); const amt = num(d.amount);
       if (card && amt > 0) {
@@ -1162,8 +1219,8 @@ document.addEventListener("change", e => {
     return;
   }
   const act = el.dataset.act; if (!act) return;
-  if (act === "txmonth" && el.value) { txMonth = el.value; render(); }
-  if (act === "cardmonth" && el.value) { cardMonth = el.value; render(); }
+  if (act === "txmonth") { txMonth = el.value; render(); }
+  if (act === "cardmonth") { cardMonth = el.value; render(); }
   if (act === "notifydays") { S.settings.notifyDays = num(el.value); commit(); }
   if (act === "cardfilter") { cardFilter = el.value; render(); }
   if (act === "goaldone") { const g = S.goals.find(x => x.id === el.dataset.id); if (g) { g.done = el.checked; commit(); } }

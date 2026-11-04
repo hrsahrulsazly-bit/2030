@@ -10,7 +10,7 @@ Bahasa antara muka: **Bahasa Melayu**. Mata wang: **RM** (`ms-MY`).
 
 ## Ciri sedia ada (6 tab, nav bawah)
 1. **Ringkasan** — hero "cop passport" 2026–2030 + kiraan hari; **Ringkasan ikut tahun** (pilih tahun atau "Semua tahun" = `yearSummary(S, 0, …)`; `yearSummary`: pendapatan = transaksi "Masuk" sebenar SAHAJA (jangan campur pendapatan dirancang — pengguna nampak berganda); jika bulan semasa belum ada Masuk, pendapatan dirancang ditunjuk sebagai "dijangka" + "Dijangka hujung bulan"; duit keluar = tx keluar kecuali "Kad kredit" + belanja kad; komitmen bulan semasa belum "Dah bayar" → baki dijangka; pecahan ikut kategori), DSR (<40% sihat, 40–60% berhati-hati, >60% tinggi); campuran pendapatan aktif/sampingan/pasif; kemajuan sasaran pasif; peringatan tarikh bayar 14 hari (butang "Dah bayar" auto-rekod transaksi); graf trend: 6 atau 12 bulan terakhir atau Jan–Dis tahun dipilih (`trendMonths` + `monthFlow`: keluar termasuk belanja kad, kecuali bayaran bil kad), dengan jumlah tempoh (SVG inline); ringkasan emas & dana kecemasan; langkah seterusnya.
-2. **Kewangan** — **Laporan bulanan → Eksport PDF** (`monthReport` data tulen + `reportHTML` ke `#printArea`, `@media print` A4, `window.print()` → "Simpan sebagai PDF"; `document.title` = nama fail); sumber pendapatan; rekod transaksi ikut bulan atau "Semua bulan" (`monthSelect` + tajuk bulan `withMonthHeads`; sama untuk rekod kad); sasaran emas (gram); dana kecemasan berperingkat: Stage 1 ASB RM15,000 → Stage 2 Tabung Haji RM15,000 (`emergencyCalc`), % dihadkan per stage, tunjuk berapa bulan komitmen+hutang boleh ditampung (termasuk `savings` = simpanan tunai lain).
+2. **Kewangan** — **Bajet bulanan** (`budgetStatus`/`spendByCat`: kategori dipadan `catKey` tanpa kira huruf besar; belanja = tx Keluar kecuali "Kad kredit" + belanja kad; ≥80% hampir, >100% lebih; belanja tanpa bajet + butang tambah cepat; `budgetWarn` toast selepas rekod; kad ringkas di Ringkasan; bahagian dalam PDF & helaian Excel "Bajet"); **Laporan & eksport**: **Excel** (`excelSheets` data tulen → 5 helaian Ringkasan/Transaksi/Kad kredit/Simpanan/Komitmen & hutang; SheetJS `xlsx@0.18.5` dimuat dari jsDelivr hanya bila diklik; tarikh = tarikh Excel, RM `#,##0.00`, gram `0.000`; bulan dipilih atau semua data; luar talian → CSV transaksi dengan BOM); **PDF** (`monthReport` data tulen + `reportHTML` ke `#printArea`, `@media print` A4, `window.print()` → "Simpan sebagai PDF"; `document.title` = nama fail); sumber pendapatan; rekod transaksi ikut bulan atau "Semua bulan" (`monthSelect` + tajuk bulan `withMonthHeads`; sama untuk rekod kad); **rekod simpanan sikit-sikit** untuk emas (beli/jual, gram 3 perpuluhan, harga dibayar) dan ASB/Tabung Haji (simpan/keluarkan) — jumlah = baki awal + rekod (`depTotal`, `goldHave`, `asbHave`, `thHave`; JANGAN baca `.have` terus); pilihan "Tolak dari baki duit" cipta tx Keluar berpaut `link: "dep:<id>"` (padam rekod → tx ikut ke tong sampah, Undo pulih kedua-dua); sasaran emas (gram); dana kecemasan berperingkat: Stage 1 ASB RM15,000 → Stage 2 Tabung Haji RM15,000 (`emergencyCalc`), % dihadkan per stage, tunjuk berapa bulan komitmen+hutang boleh ditampung (termasuk `savings` = simpanan tunai lain).
 3. **Hutang/Kad** — kad kredit (borang Transaksi ada "Bayar guna" Tunai/debit atau kad → belanja kad masuk `cardTx` dan dipapar dalam senarai Transaksi dengan 💳; status setiap belanja kad "Sudah bayar / Separa / Belum bayar" ikut `cardAlloc` (bayaran tutup belanja paling lama dahulu); `cardDueLine` + `nextDue` tunjuk baki belum bayar & tarikh akhir di Hutang/Kad dan kad "Kad kredit" di Ringkasan; bayaran bil kad (tx kategori "Kad kredit") dipapar tetapi tidak dikira dalam Keluar; had, baki, % penggunaan <30% sihat, belanja bulan ikut kategori, bayaran minimum ≈5%/RM50, rekod belanja & bayaran; bayaran kad juga direkod dalam `tx`); komitmen bulanan (tarikh bayar); hutang disusun ikut faedah tertinggi (avalanche) dengan anggaran tarikh selesai.
 4. **Pelan 2030** — matlamat ikut tahun, templat cadangan (TTT → HRD Corp → modul pematuhan → app AI → pasif).
 5. **Niaga** — projek dengan peringkat Idea → Validasi → Bina → Lancar → Skala + senarai langkah proses; templat idea.
@@ -19,7 +19,7 @@ Bahasa antara muka: **Bahasa Melayu**. Mata wang: **RM** (`ms-MY`).
 ## Model data (satu objek `S`)
 ```js
 {
-  v: 5,
+  v: 7,
   updatedAt: Number,   // ms, untuk penyegerakan awan (v2)
   settings: { name, targetPassive, emergencyMonths, notify, notifyDays },
   savings: Number,
@@ -31,9 +31,11 @@ Bahasa antara muka: **Bahasa Melayu**. Mata wang: **RM** (`ms-MY`).
   ventures:    [{ id, name, kind, target, stage: 0-4, steps: [{ t, done }] }],
   cards:       [{ id, name, limit, dueDay, rate }],                       // v3
   cardTx:      [{ id, cardId, date, type: "belanja"|"bayar"|"awal", amount, cat, note }],  // v3
+  budgets:     [{ id, cat, amount }],   // v7: bajet bulanan berulang ikut kategori
+  deposits:    [{ id, kind: "emas"|"asb"|"th", dir: "in"|"out", date, amount, grams?, note }],  // v6: rekod simpanan
   trash:       { "<id>": { list, item, at, cardTx?, ventureId?, index? } },  // v5: tong sampah 30 hari
   paid:        { "<itemId>:<YYYY-MM>": true },   // peringatan yang sudah dibayar
-  gold: { have, target: 30, price, by: "YYYY-MM" },
+  gold: { have, target: 30, price, by: "YYYY-MM" },   // have/asb.have/th.have = BAKI AWAL sebelum rekod; jumlah sebenar = goldHave(S)/asbHave(S)/thHave(S)
   asb:  { have, s1: 15000, s1by },            // dana kecemasan stage 1 (ASB); asb.s2/s2by lama dikekalkan tetapi tidak digunakan
   th:   { have, target: 15000, by }           // v4: dana kecemasan stage 2 (Tabung Haji)
 }
@@ -63,6 +65,15 @@ Bahasa antara muka: **Bahasa Melayu**. Mata wang: **RM** (`ms-MY`).
 - Repo pengguna `hrsahrulsazly-bit/2030` ada GitHub Action `.github/workflows/segerak.yml` (salinan di `github-sync/segerak.yml`) yang menarik branch ini setiap 15 minit dan commit ke `main` — kecuali `config.js` dan `.github/`. Commit dibuat atas nama `github.actor` (bukan bot) kerana Vercel Hobby tidak deploy commit bot. Vercel deploy daripada `main`. Perubahan pada fail workflow mesti disalin manual oleh pengguna (folder `.github/` dikecualikan).
 - Jadi: cukup push ke branch ini; jangan ubah `config.js` dengan kunci sebenar di sini.
 
+## Guna di telefon
+- Butang terapung ＋ (`#fab`) di semua tab → bottom sheet `#sheet` (`openQuick`/`renderQuick`, keadaan `Q`): Keluar/Masuk, jumlah (papan kekunci nombor, fokus automatik), cip kategori (`quickCats`: bajet + paling kerap 90 hari + lalai), cara bayar (Tunai/kad), nota, tarikh. Simpan guna `recordTx()` — fungsi yang sama dengan borang Kewangan.
+- Pintasan manifest (tekan lama ikon app): `?tambah=keluar` / `?tambah=masuk` buka sheet terus.
+
+## Auto catat duit masuk dari e-mel
+- `google-apps-script/duit-masuk.gs`: skrip Google Apps Script dalam akaun Gmail pengguna; semak e-mel bank setiap 5 minit (`pasang()` cipta trigger), `kesanDuitMasuk()` kesan notifikasi masuk & jumlah (abaikan baki, bayaran keluar, TAC, belian kad, penyata). Panggil RPC `add_incoming(token, …)` (anon + kunci awam). Ujian: `tests/emel.test.mjs`.
+- App (Tetapan → "Auto catat duit masuk"): `makeEmailToken` (48 hex, jadual `plan_tokens`), `copyEmailScript` (fetch fail .gs, isi `__URL__`/`__KEY__`/`__TOKEN__`), `revokeEmailToken`. `importIncoming()` selepas segerak & Realtime INSERT `incoming` → tx Masuk id tetap `inc-<id>` (tiada berganda antara telefon), kategori "Gaji" jika nota ada gaji/salary, lain "Duit masuk"; tanda `imported`.
+- Supabase: `plan_tokens`, `incoming` (unik `plan_id,msg_id`), fungsi `add_incoming`/`check_token` (security definer). Token hanya boleh menambah, tidak membaca.
+
 ## Format nombor
 - Wang: `RM()` sentiasa 2 tempat perpuluhan (RM 4,782.00), dibundar ke sen. Semua input wang `step="0.01" inputmode="decimal"`.
 - Emas: `fmtG()` hingga 3 tempat perpuluhan (1.025 g); input gram `step="0.001"`.
@@ -75,8 +86,7 @@ Bahasa antara muka: **Bahasa Melayu**. Mata wang: **RM** (`ms-MY`).
 ## Cadangan kerja seterusnya
 - Pecahkan kepada projek (cth. Vite + vanilla/React) atau kekalkan satu fail — tanya pengguna.
 - Web Push sebenar (Supabase Edge Function + cron + VAPID) jika notifikasi latar belakang tidak cukup.
-- Eksport Excel/CSV (PDF sudah ada).
-- Ujian: `node --test tests/calc.test.mjs` (kiraan, migrasi, .ics, gabungan tiga hala).
+- Ujian: `node --test tests/calc.test.mjs tests/emel.test.mjs`.
 
 ## Peraturan
 - Teks UI dalam Bahasa Melayu, ayat biasa (bukan huruf besar semua).

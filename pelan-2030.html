@@ -103,6 +103,22 @@ svg.chart text{fill:var(--muted);font-size:10px;font-family:"IBM Plex Sans",sans
 .toast{max-width:calc(100vw - 32px);position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:8px 14px;border-radius:10px;font-size:.9rem;z-index:20}
 @media (prefers-reduced-motion:no-preference){.bar>i{transition:width .4s ease}}
 #printArea{display:none}
+#fab{position:fixed;right:16px;bottom:calc(78px + env(safe-area-inset-bottom));width:58px;height:58px;border-radius:50%;border:0;background:var(--red);color:#fff;font-size:30px;line-height:1;box-shadow:0 6px 18px rgba(0,0,0,.28);z-index:15;padding:0}
+#sheet{position:fixed;inset:0;z-index:30;background:rgba(10,16,24,.55);display:flex;align-items:flex-end;justify-content:center}
+#sheet[hidden]{display:none}
+#sheet .panel{background:var(--card);color:var(--ink);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));max-height:92vh;overflow:auto}
+#sheet .grab{width:44px;height:5px;border-radius:3px;background:var(--line);margin:0 auto 10px}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--paper);padding:4px;border-radius:12px}
+.seg button{border:0;background:transparent;font-weight:600;padding:10px}
+.seg button[aria-pressed="true"]{background:var(--card);box-shadow:var(--shadow);color:var(--red)}
+.seg button.in[aria-pressed="true"]{color:var(--teal)}
+.amt{font:700 2rem "Bricolage Grotesque",sans-serif;text-align:center;border:0;border-bottom:2px solid var(--line);border-radius:0;background:transparent;padding:10px 4px;margin:10px 0}
+.amt:focus{outline:none;border-bottom-color:var(--red)}
+.amt::-webkit-inner-spin-button,.amt::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.amt{-moz-appearance:textfield}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
+.chips button{border-radius:99px;padding:7px 12px;font-size:.88rem}
+.chips button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+@media print{#fab,#sheet{display:none!important}}
 @media print{
   @page{size:A4;margin:14mm 12mm}
   html,body{background:#fff!important;padding:0!important}
@@ -137,17 +153,21 @@ svg.chart text{fill:var(--muted);font-size:10px;font-family:"IBM Plex Sans",sans
 <body>
 <main id="app" aria-live="polite"></main>
 <nav class="tabs" aria-label="Navigasi utama" id="nav"></nav>
+<button id="fab" type="button" aria-label="Rekod transaksi baru" data-act="quick">＋</button>
+<div id="sheet" hidden></div>
 <input type="file" id="restoreFile" accept="application/json,.json" hidden>
 
 <script>
 // @logic-start — fungsi tulen (diuji dalam tests/calc.test.mjs)
 const DEFAULTS = () => ({
-  v: 5,
+  v: 7,
   updatedAt: 0,
   settings: { name: "", targetPassive: 3000, emergencyMonths: 6, notify: false, notifyDays: 3 },
   savings: 0,
   incomes: [], commitments: [], debts: [], tx: [], goals: [], ventures: [],
   cards: [], cardTx: [],
+  budgets: [],  // v7: bajet bulanan berulang { id, cat, amount }
+  deposits: [], // v6: rekod simpanan { id, kind: "emas"|"asb"|"th", dir: "in"|"out", date, amount (RM), grams?, note }
   trash: {},   // v5: item dipadam { id: { list, item, at, cardTx?, ventureId?, index? } } — disimpan 30 hari
   paid: {},
   gold: { have: 0, target: 30, price: 0, by: "2028-12" },
@@ -163,7 +183,7 @@ function normalize(d) {
   o.gold = Object.assign({}, b.gold, d.gold || {});
   o.asb = Object.assign({}, b.asb, d.asb || {});
   o.th = Object.assign({}, b.th, d.th || {});
-  for (const k of ["incomes", "commitments", "debts", "tx", "goals", "ventures", "cards", "cardTx"]) {
+  for (const k of ["incomes", "commitments", "debts", "tx", "goals", "ventures", "cards", "cardTx", "deposits", "budgets"]) {
     if (!Array.isArray(o[k])) o[k] = [];
   }
   if (!o.paid || typeof o.paid !== "object") o.paid = {};
@@ -178,6 +198,10 @@ function normalize(d) {
   // v4 → v5: tong sampah
   if (!o.trash || typeof o.trash !== "object" || Array.isArray(o.trash)) o.trash = {};
   if (o.v < 5) o.v = 5;
+  // v5 → v6: rekod simpanan. Baki sedia ada (gold/asb/th .have) kekal sebagai "baki awal".
+  if (o.v < 6) o.v = 6;
+  // v6 → v7: bajet bulanan ikut kategori
+  if (o.v < 7) o.v = 7;
   o.updatedAt = Number(o.updatedAt) || 0;
   return o;
 }
@@ -198,7 +222,7 @@ function calc(S) {
   const passivePct = target > 0 ? Math.min(100, (mix.pasif / target) * 100) : 0;
   const totalDebt = sum(S.debts, x => x.balance);
   const asbT = Number(S.asb.s1) || 0, thT = Number(S.th.target) || 0;
-  const asbH = Number(S.asb.have) || 0, thH = Number(S.th.have) || 0;
+  const asbH = asbHave(S), thH = thHave(S);
   const emergencyTarget = asbT + thT;
   const emergencyHave = asbH + thH;
   // Setiap stage dihadkan pada sasarannya supaya lebihan ASB tidak menutup kekurangan Tabung Haji.
@@ -296,10 +320,19 @@ function trend(tx, today, n) {
   }
   return out;
 }
+// Simpanan = baki awal + semua rekod simpanan (dir "out" = jual / keluarkan).
+function depTotal(S, kind) {
+  return sum(S.deposits.filter(d => d.kind === kind), d => (d.dir === "out" ? -1 : 1) * (Number(kind === "emas" ? d.grams : d.amount) || 0));
+}
+const goldHave = S => Math.round(((Number(S.gold.have) || 0) + depTotal(S, "emas")) * 1000) / 1000;
+const asbHave = S => Math.round(((Number(S.asb.have) || 0) + depTotal(S, "asb")) * 100) / 100;
+const thHave = S => Math.round(((Number(S.th.have) || 0) + depTotal(S, "th")) * 100) / 100;
+const goldCost = S => sum(S.deposits.filter(d => d.kind === "emas" && d.dir !== "out"), d => d.amount);
+
 // Dana kecemasan berperingkat: Stage 1 ASB → Stage 2 Tabung Haji.
 function emergencyCalc(S, today) {
-  const s1 = savCalc(S.asb.have, S.asb.s1, S.asb.s1by, today);
-  const s2 = savCalc(S.th.have, S.th.target, S.th.by, today);
+  const s1 = savCalc(asbHave(S), S.asb.s1, S.asb.s1by, today);
+  const s2 = savCalc(thHave(S), S.th.target, S.th.by, today);
   const stage = s1.need > 0 ? 1 : s2.need > 0 ? 2 : 3; // 3 = kedua-dua selesai
   return { s1, s2, stage };
 }
@@ -415,13 +448,110 @@ function monthReport(S, m, today) {
   const c = calc(S), e = emergencyCalc(S, today);
   return { m, in: flow.in, out: flow.out, net: flow.in - flow.out, byCat, rows, commitments, debts, cards,
     committed: c.out, dsr: c.dsr, dsrLevel: c.dsrLevel,
-    emergency: { asb: Number(S.asb.have) || 0, asbTarget: Number(S.asb.s1) || 0, th: Number(S.th.have) || 0, thTarget: Number(S.th.target) || 0, stage: e.stage },
-    gold: { have: Number(S.gold.have) || 0, target: Number(S.gold.target) || 0 } };
+    emergency: { asb: asbHave(S), asbTarget: Number(S.asb.s1) || 0, th: thHave(S), thTarget: Number(S.th.target) || 0, stage: e.stage },
+    gold: { have: goldHave(S), target: Number(S.gold.target) || 0 },
+    budget: budgetStatus(S, m),
+    deposits: S.deposits.filter(inM).slice().sort((a, b) => String(a.date).localeCompare(String(b.date))) };
+}
+
+// Helaian Excel sebagai tatasusunan baris. m = "YYYY-MM" atau "" (semua data).
+// Setiap helaian: { name, rows, money: [indeks lajur RM], grams: [indeks lajur gram], dates: [indeks lajur tarikh] }
+function excelSheets(S, m, today) {
+  const inR = t => !m || String(t.date).slice(0, 7) === m;
+  const cardNm = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
+  const KL = { emas: "Emas", asb: "ASB", th: "Tabung Haji" };
+  const n2 = v => Math.round((Number(v) || 0) * 100) / 100;
+  // Ringkasan
+  const ys = m ? null : yearSummary(S, 0, today);
+  const flow = m ? monthFlow(S, m) : { in: ys.income, out: ys.spent };
+  const tx = S.tx.filter(inR), ctx = S.cardTx.filter(inR);
+  const byCat = {};
+  for (const t of tx) if (t.type === "out" && t.cat !== "Kad kredit") byCat[t.cat || "Lain-lain"] = (byCat[t.cat || "Lain-lain"] || 0) + (Number(t.amount) || 0);
+  for (const t of ctx) if (t.type === "belanja") byCat[t.cat || "Lain-lain"] = (byCat[t.cat || "Lain-lain"] || 0) + (Number(t.amount) || 0);
+  const c = calc(S);
+  const ring = [
+    ["Laporan kewangan", m ? fmtYMx(m) : "Semua data"],
+    ["Nama", S.settings.name || ""],
+    [],
+    ["Masuk (RM)", n2(flow.in)],
+    ["Keluar (RM)", n2(flow.out)],
+    ["Bersih (RM)", n2(flow.in - flow.out)],
+    ["Komitmen + hutang sebulan (RM)", n2(c.out)],
+    ["DSR", isFinite(c.dsr) ? Math.round(c.dsr) + "% (" + c.dsrLevel + ")" : "—"],
+    [],
+    ["Duit keluar ikut kategori", "Jumlah (RM)", "%"],
+    ...Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, n2(v), flow.out ? Math.round(v / flow.out * 1000) / 10 : 0])
+  ];
+  // Transaksi (tunai + belanja kad)
+  const trx = [["Tarikh", "Jenis", "Kategori", "Nota", "Cara bayar", "Jumlah (RM)", "Dikira dalam Keluar"],
+    ...[...tx.map(t => [t.date, t.type === "in" ? "Masuk" : "Keluar", t.cat, t.note || "", t.type === "in" ? "" : t.cat === "Kad kredit" ? "Bayar bil kad" : "Tunai / debit", n2(t.amount), t.type === "in" ? "" : t.cat === "Kad kredit" ? "Tidak" : "Ya"]),
+       ...ctx.filter(t => t.type === "belanja").map(t => [t.date, "Keluar", t.cat, t.note || "", "Kad " + cardNm(t.cardId), n2(t.amount), "Ya"])]
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))];
+  // Kad kredit
+  const alloc = Object.assign({}, ...S.cards.map(k => cardAlloc(S, k.id)));
+  const ST = { dibayar: "Sudah bayar", separa: "Separa", belum: "Belum bayar" };
+  const kad = [["Tarikh", "Kad", "Jenis", "Kategori", "Nota", "Jumlah (RM)", "Status bayar", "Baki belum bayar (RM)"],
+    ...ctx.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(t => [t.date, cardNm(t.cardId), { belanja: "Belanja", bayar: "Bayaran", awal: "Baki awal" }[t.type] || t.type, t.cat || "", t.note || "", n2(t.amount),
+      t.type === "bayar" ? "" : (ST[(alloc[t.id] || {}).status] || ""), t.type === "bayar" ? "" : n2((alloc[t.id] || {}).owed)]),
+    [],
+    ["Ringkasan kad", "Had (RM)", "Baki semasa (RM)", "% had"],
+    ...S.cards.map(k => { const r = cardCalc(S, k, today); return [k.name, n2(r.limit), n2(r.balance), Math.round(r.util * 10) / 10]; })];
+  // Simpanan
+  const sim = [["Tarikh", "Akaun", "Jenis", "Gram", "Jumlah (RM)", "Nota"],
+    ...S.deposits.filter(inR).slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(d => [d.date, KL[d.kind] || d.kind,
+      d.dir === "out" ? (d.kind === "emas" ? "Jual" : "Keluarkan") : (d.kind === "emas" ? "Beli" : "Simpan"), d.kind === "emas" ? Number(d.grams) || 0 : "", n2(d.amount), d.note || ""]),
+    [],
+    ["Jumlah semasa", "Ada", "Sasaran"],
+    ["Emas (gram)", goldHave(S), Number(S.gold.target) || 0],
+    ["ASB · Stage 1 (RM)", asbHave(S), Number(S.asb.s1) || 0],
+    ["Tabung Haji · Stage 2 (RM)", thHave(S), Number(S.th.target) || 0]];
+  // Komitmen & hutang
+  const km = [["Perkara", "Jenis", "Hari bayar", "Jumlah sebulan (RM)", "Baki hutang (RM)", "Faedah %", m ? "Status " + fmtYMx(m) : "Status bulan ini"],
+    ...S.commitments.map(x => [x.name, "Komitmen", Number(x.day) || "", n2(x.amount), "", "", S.paid[x.id + ":" + (m || ym(today))] ? "Sudah bayar" : "Belum bayar"]),
+    ...S.debts.map(x => [x.name, "Hutang", Number(x.day) || "", n2(x.payment), n2(x.balance), Number(x.rate) || 0, (Number(x.balance) || 0) <= 0 ? "Selesai" : S.paid[x.id + ":" + (m || ym(today))] ? "Sudah bayar" : "Belum bayar"])];
+  return [
+    { name: "Ringkasan", rows: ring, money: [1], cols: [34, 16, 8] },
+    { name: "Transaksi", rows: trx, money: [5], dates: [0], cols: [12, 9, 18, 30, 20, 13, 10] },
+    { name: "Kad kredit", rows: kad, money: [5, 7], dates: [0], cols: [12, 18, 10, 16, 24, 13, 13, 14] },
+    { name: "Simpanan", rows: sim, money: [4], grams: [3], dates: [0], cols: [26, 14, 10, 10, 13, 24] },
+    { name: "Komitmen & hutang", rows: km, money: [3, 4], cols: [24, 10, 9, 14, 14, 9, 16] },
+    ...(S.budgets.length ? [{ name: "Bajet", money: [2, 3, 4], cols: [10, 22, 13, 13, 13, 7, 12], rows: (() => {
+      const months = m ? [m] : [...new Set([...S.tx, ...S.cardTx].map(t => String(t.date).slice(0, 7)))].filter(x => /^\d{4}-\d{2}$/.test(x)).sort();
+      const out = [["Bulan", "Kategori", "Bajet (RM)", "Belanja (RM)", "Baki (RM)", "%", "Status"]];
+      for (const mm of months) for (const b of budgetStatus(S, mm).rows)
+        out.push([fmtYMx(mm), b.cat, n2(b.amount), n2(b.spent), n2(b.left), isFinite(b.pct) ? Math.round(b.pct) : "", { lebih: "Lebih bajet", hampir: "Hampir", ok: "OK" }[b.level]]);
+      return out;
+    })() }] : [])
+  ];
+}
+const fmtYMx = k => { const B = ["Jan","Feb","Mac","Apr","Mei","Jun","Jul","Ogo","Sep","Okt","Nov","Dis"]; const [y, mm] = String(k).split("-"); return B[+mm - 1] + " " + y; };
+
+// Bajet: kategori dipadankan tanpa kira huruf besar/kecil & ruang. Belanja = definisi sama dengan ringkasan
+// (tx Keluar kecuali "Kad kredit" + belanja kad).
+const catKey = c => String(c || "Lain-lain").trim().replace(/\s+/g, " ").toLowerCase();
+function spendByCat(S, m) {
+  const out = {};
+  const add = (cat, amt) => { const k = catKey(cat); if (!out[k]) out[k] = { label: String(cat || "Lain-lain").trim() || "Lain-lain", amount: 0 }; out[k].amount += Number(amt) || 0; };
+  for (const t of S.tx) if (t.type === "out" && t.cat !== "Kad kredit" && String(t.date).slice(0, 7) === m) add(t.cat, t.amount);
+  for (const t of S.cardTx) if (t.type === "belanja" && String(t.date).slice(0, 7) === m) add(t.cat, t.amount);
+  return out;
+}
+function budgetStatus(S, m) {
+  const sp = spendByCat(S, m);
+  const rows = S.budgets.map(b => {
+    const amount = Number(b.amount) || 0, spent = Math.round(((sp[catKey(b.cat)] || {}).amount || 0) * 100) / 100;
+    const pct = amount > 0 ? spent / amount * 100 : spent > 0 ? Infinity : 0;
+    return { id: b.id, cat: b.cat, amount, spent, left: Math.round((amount - spent) * 100) / 100, pct, level: pct > 100 ? "lebih" : pct >= 80 ? "hampir" : "ok" };
+  }).sort((a, b) => b.pct - a.pct);
+  const keys = new Set(S.budgets.map(b => catKey(b.cat)));
+  const unbudgeted = Object.entries(sp).filter(([k]) => !keys.has(k)).map(([, v]) => ({ cat: v.label, spent: Math.round(v.amount * 100) / 100 })).sort((a, b) => b.spent - a.spent);
+  const budget = sum(rows, r => r.amount), spentB = sum(rows, r => r.spent);
+  return { rows, unbudgeted, budget, spent: spentB, unbudgetedTotal: sum(unbudgeted, u => u.spent), pct: budget ? spentB / budget * 100 : 0 };
 }
 
 // ---------- tong sampah & pulih ----------
-const LISTS = ["incomes", "commitments", "debts", "tx", "goals", "ventures", "cards", "cardTx"];
-const LIST_LABEL = { incomes: "Pendapatan", commitments: "Komitmen", debts: "Hutang", tx: "Transaksi", goals: "Matlamat", ventures: "Projek niaga", cards: "Kad kredit", cardTx: "Rekod kad", steps: "Langkah projek" };
+const LISTS = ["incomes", "commitments", "debts", "tx", "goals", "ventures", "cards", "cardTx", "deposits", "budgets"];
+const LIST_LABEL = { incomes: "Pendapatan", commitments: "Komitmen", debts: "Hutang", tx: "Transaksi", goals: "Matlamat", ventures: "Projek niaga", cards: "Kad kredit", cardTx: "Rekod kad", deposits: "Rekod simpanan", budgets: "Bajet", steps: "Langkah projek" };
 function purgeTrash(S, now, days = 30) {
   for (const [k, e] of Object.entries(S.trash)) if (!e || now - (Number(e.at) || 0) > days * 864e5) delete S.trash[k];
 }
@@ -482,6 +612,8 @@ function describeItem(list, it) {
     case "ventures": return it.name;
     case "cards": return `${it.name} · had ${rm(it.limit)}`;
     case "steps": return it.t;
+    case "budgets": return `${it.cat} · ${rm(it.amount)}/bln`;
+    case "deposits": return `${{ emas: "Emas", asb: "ASB", th: "Tabung Haji" }[it.kind] || it.kind} ${it.dir === "out" ? "keluar" : "simpan"} ${it.kind === "emas" ? (Number(it.grams) || 0) + " g" + (it.amount ? " (" + rm(it.amount) + ")" : "") : rm(it.amount)} · ${it.date}`;
     default: return String(it.name || it.title || it.id);
   }
 }
@@ -728,6 +860,7 @@ async function syncNow() {
   try {
     do { syncAgain = false; await syncOnce(); } while (syncAgain);
     setSync("Disegerak " + jam());
+    setTimeout(importIncoming, 0);
   } catch (e) {
     const m = String((e && e.message) || e);
     setSync(/shared_plans|relation|schema cache/i.test(m) ? "Jadual Supabase belum dikemas kini — jalankan supabase/schema.sql" : "Gagal segerak: " + m);
@@ -739,8 +872,77 @@ function afterAttach() {
   channel = sb.channel("pelan-" + plan.id)
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "shared_plans", filter: "id=eq." + plan.id },
       ev => { if (ev.new && ev.new.version !== plan.version) syncNow(); })
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "incoming", filter: "plan_id=eq." + plan.id }, () => importIncoming())
     .subscribe();
   loadMembers();
+  loadEmailToken();
+}
+
+/* ---------- auto catat duit masuk dari e-mel ---------- */
+let emailTok = null, emailTokLoaded = false, importing = false;
+async function importIncoming() {
+  if (!sb || !sbUser || !plan || importing) return;
+  importing = true;
+  try {
+    const { data, error } = await sb.from("incoming").select("id, amount, tx_date, description").eq("plan_id", plan.id).eq("imported", false).order("id").limit(50);
+    if (error || !data || !data.length) return;
+    let n = 0, total = 0;
+    for (const r of data) {
+      const id = "inc-" + r.id;   // id tetap: telefon lain yang import serentak tidak menggandakan
+      if (S.tx.some(t => t.id === id) || S.trash[id]) continue;
+      const desc = String(r.description || "").trim();
+      S.tx.push({ id, date: r.tx_date, type: "in", cat: /gaji|salary|payroll|upah|elaun/i.test(desc) ? "Gaji" : "Duit masuk", amount: Number(r.amount) || 0, note: (desc ? desc.slice(0, 80) + " · " : "") + "auto e-mel" });
+      n++; total += Number(r.amount) || 0;
+    }
+    await sb.from("incoming").update({ imported: true }).in("id", data.map(r => r.id));
+    if (n) { commit(); toast(`${n} duit masuk dicatat automatik dari e-mel (${RM(total)})`); }
+  } catch {} finally { importing = false; }
+}
+async function loadEmailToken() {
+  if (!plan) return;
+  try { const { data } = await sb.from("plan_tokens").select("token, created_at").eq("plan_id", plan.id).order("created_at", { ascending: false }).limit(1); emailTok = (data && data[0]) || null; } catch { emailTok = null; }
+  emailTokLoaded = true;
+  if (tab === "tetapan") render();
+}
+async function makeEmailToken() {
+  const token = [...crypto.getRandomValues(new Uint8Array(24))].map(x => x.toString(16).padStart(2, "0")).join("");
+  const { error } = await sb.from("plan_tokens").insert({ token, plan_id: plan.id });
+  if (error) return toast(/relation|schema cache|plan_tokens/i.test(error.message) ? "Jalankan semula supabase/schema.sql di Supabase dahulu" : "Gagal: " + error.message);
+  emailTok = { token, created_at: new Date().toISOString() }; render(); toast("Kod sambungan dijana");
+}
+async function revokeEmailToken() {
+  const { error } = await sb.from("plan_tokens").delete().eq("plan_id", plan.id);
+  if (error) return toast("Gagal: " + error.message);
+  emailTok = null; render(); toast("Kod dibatalkan — skrip Gmail lama tidak boleh menghantar lagi");
+}
+async function copyEmailScript() {
+  try {
+    const r = await fetch("google-apps-script/duit-masuk.gs", { cache: "no-store" });
+    if (!r.ok) throw new Error();
+    const code = (await r.text()).replace("__URL__", CFG.supabaseUrl).replace("__KEY__", CFG.supabaseKey).replace("__TOKEN__", emailTok.token);
+    try { await navigator.clipboard.writeText(code); toast("Skrip disalin ✓ — tampal di script.google.com"); }
+    catch { const ta = document.getElementById("gsCode"); if (ta) { ta.value = code; ta.hidden = false; ta.select(); } toast("Pilih semua teks dalam kotak dan salin"); }
+  } catch { toast("Tidak dapat muat skrip — semak sambungan internet"); }
+}
+function vEmailAuto() {
+  if (!sbUser || !plan) return "";
+  const recent = S.tx.filter(t => String(t.id).startsWith("inc-")).sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 5);
+  let body;
+  if (!emailTokLoaded) body = `<p class="small muted">Memuatkan…</p>`;
+  else if (!emailTok) body = `<p class="small muted">Bila bank hantar e-mel notifikasi duit masuk, ia dicatat sebagai transaksi <b>Masuk</b> secara automatik. Menggunakan skrip kecil dalam akaun Google anda sendiri — app ini tidak membaca e-mel anda.</p>
+    <button class="primary" data-act="emailtok">Mula sediakan</button>`;
+  else body = `<p class="small"><span class="pill ok">Kod aktif</span> <span class="muted">sejak ${fmtD(String(emailTok.created_at).slice(0, 10))}</span></p>
+    <ol class="small" style="padding-left:18px;margin:.4rem 0">
+      <li>Tekan <b>Salin skrip</b> (kod anda sudah diisi).</li>
+      <li>Buka <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com</a> (log masuk akaun Gmail yang terima e-mel bank) → padam semua teks → tampal → <b>Simpan</b> 💾.</li>
+      <li>Di atas, pilih fungsi <b>pasang</b> → <b>Jalankan</b> → <b>Semak kebenaran</b> → pilih akaun → <i>Advanced</i> → <i>Go to … (unsafe)</i> → <b>Allow</b>.</li>
+      <li>Siap. E-mel duit masuk disemak setiap 5 minit dan muncul di Transaksi dengan nota "auto e-mel".</li>
+    </ol>
+    <div class="row"><button class="primary" data-act="emailcopy">Salin skrip</button><button class="ghost sm" data-act="emailrevoke">Batalkan kod</button></div>
+    <textarea id="gsCode" hidden readonly rows="6" style="margin-top:8px;font:12px monospace"></textarea>
+    <p class="small muted">Pastikan notifikasi e-mel untuk duit masuk diaktifkan dalam app bank anda. Jika bank anda tidak dikesan, ubah senarai <code>PENGIRIM</code> dalam skrip.</p>
+    ${recent.length ? `<h3 style="margin-top:12px">Terkini dicatat automatik</h3><ul class="list">${recent.map(t => `<li style="padding:6px 0"><div class="grow"><div>${esc(t.cat)}</div><div class="small muted">${fmtD(t.date)} · ${esc(t.note)}</div></div><span class="num pos">+${RM(t.amount)}</span></li>`).join("")}</ul>` : ""}`;
+  return `<section class="card"><h2>Auto catat duit masuk (e-mel)</h2>${body}</section>`;
 }
 async function loadMembers() {
   if (!plan) return;
@@ -790,7 +992,7 @@ async function initCloud() {
     const changed = (u && u.id) !== (sbUser && sbUser.id);
     sbUser = u;
     if (changed) {
-      plan = null; members = []; loginErr = "";
+      plan = null; members = []; loginErr = ""; emailTok = null; emailTokLoaded = false;
       if (channel) { sb.removeChannel(channel); channel = null; }
       render(); if (u) setTimeout(syncNow, 0);
     }
@@ -853,6 +1055,7 @@ function nextSteps(c) {
     if (e.stage === 1) s.push(`Dana kecemasan stage 1: tambah ${RM(e.s1.need)} lagi dalam ASB${isFinite(e.s1.perMonth) ? ` (${RM(e.s1.perMonth)} sebulan)` : ""}.`);
     else if (e.stage === 2) s.push(`Dana kecemasan stage 2: tambah ${RM(e.s2.need)} lagi dalam Tabung Haji${isFinite(e.s2.perMonth) ? ` (${RM(e.s2.perMonth)} sebulan)` : ""}.`); }
   for (const cd of S.cards) { const k = cardCalc(S, cd, today()); if (k.util >= 30) s.push(`Kad ${cd.name} guna ${k.util.toFixed(0)}% had — cuba kurangkan bawah 30%.`); }
+  for (const r of budgetStatus(S, ym(today())).rows) if (r.level === "lebih") s.push(`Bajet ${r.cat} bulan ini lebih ${RM(-r.left)}.`);
   if (!S.goals.length) s.push("Isi matlamat tahunan di tab Pelan 2030 (guna templat).");
   const g = S.goals.filter(x => !x.done).sort((a, b) => a.year - b.year)[0];
   if (g) s.push(`Matlamat ${g.year}: ${g.title}`);
@@ -873,7 +1076,7 @@ function vRingkasan() {
   const stamps = [2026, 2027, 2028, 2029, 2030].map(y => `<span class="stamp ${y === yr ? "now" : y < yr ? "past" : ""}">${y}</span>`).join("");
   const up = upcoming(S, t);
   const mixT = c.income || 1;
-  const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
+  const gs = savCalc(goldHave(S), S.gold.target, S.gold.by, t);
   const em = emergencyCalc(S, t);
   return `
   <section class="card hero">
@@ -905,6 +1108,14 @@ function vRingkasan() {
     ${bar(c.passivePct)}
   </section>
 
+  ${S.budgets.length ? (() => { const bs = budgetStatus(S, ym(t)); const warn = bs.rows.filter(r => r.level !== "ok");
+    return `<section class="card">
+    <div class="row between"><h2>Bajet ${fmtYM(ym(t))}</h2><button class="sm" data-tab="kewangan" data-goto="bajet">Urus</button></div>
+    <div class="row between small"><span>${RM(bs.spent)} / ${RM(bs.budget)}</span><span>${bs.pct.toFixed(0)}%</span></div>
+    ${budgetBar({ pct: bs.pct, level: bs.pct > 100 ? "lebih" : bs.pct >= 80 ? "hampir" : "ok" })}
+    ${warn.length ? `<ul class="list" style="margin-top:6px">${warn.map(r => `<li style="padding:6px 0"><div class="grow">${esc(r.cat)}<div class="small muted">${RM(r.spent)} / ${RM(r.amount)}</div></div><span class="pill ${r.level === "lebih" ? "bad" : "warn"}">${r.level === "lebih" ? "Lebih " + RM(-r.left) : r.pct.toFixed(0) + "%"}</span></li>`).join("")}</ul>` : `<p class="small muted" style="margin:.4rem 0 0">Semua kategori dalam bajet 👍</p>`}
+  </section>`; })() : ""}
+
   ${S.cards.length ? `<section class="card">
     <h2>Kad kredit</h2>
     <ul class="list">${S.cards.map(cd => { const k = cardCalc(S, cd, t); return `<li><div class="grow"><div>💳 ${esc(cd.name)}</div>${cardDueLine(cd, k)}</div>${k.balance > 0 ? `<button class="sm" data-tab="hutang">Bayar</button>` : ""}</li>`; }).join("")}</ul>
@@ -931,12 +1142,12 @@ function vRingkasan() {
 
   <section class="card">
     <h2>Emas & dana kecemasan</h2>
-    <div class="row between small"><span>Emas ${fmtG(S.gold.have)} / ${fmtG(S.gold.target)}</span><span>${gs.pct.toFixed(0)}%</span></div>
+    <div class="row between small"><span>Emas ${fmtG(goldHave(S))} / ${fmtG(S.gold.target)}</span><span>${gs.pct.toFixed(0)}%</span></div>
     ${bar(gs.pct, "gold")}
     <p class="small muted">${gs.need ? `${fmtG(gs.perMonth)} sebulan hingga ${fmtYM(S.gold.by)}` : "Sasaran tercapai 🎉"}</p>
     <div class="row between small" style="margin-top:6px"><span>Dana kecemasan ${RM(c.emergencyHave)} / ${RM(c.emergencyTarget)}</span><span>${c.emergencyPct.toFixed(0)}%</span></div>
     ${bar(c.emergencyPct)}
-    <p class="small muted">${em.stage === 3 ? "Kedua-dua stage tercapai 🎉" : em.stage === 1 ? `Stage 1 (ASB): ${RM(S.asb.have)} / ${RM(S.asb.s1)}` : `Stage 1 (ASB) ✓ · Stage 2 (Tabung Haji): ${RM(S.th.have)} / ${RM(S.th.target)}`}</p>
+    <p class="small muted">${em.stage === 3 ? "Kedua-dua stage tercapai 🎉" : em.stage === 1 ? `Stage 1 (ASB): ${RM(asbHave(S))} / ${RM(S.asb.s1)}` : `Stage 1 (ASB) ✓ · Stage 2 (Tabung Haji): ${RM(thHave(S))} / ${RM(S.th.target)}`}</p>
   </section>
 
   <section class="card">
@@ -976,13 +1187,15 @@ function reportHTML(r) {
   </div>
   <h2>Duit keluar ikut kategori</h2>
   ${r.byCat.length ? tbl(["Kategori", "%", "Jumlah (RM)"], r.byCat.map(c => `<tr><td>${esc(c.cat)}<div class="bar"><i style="width:${c.pct.toFixed(1)}%"></i></div></td><td class="r">${c.pct.toFixed(0)}%</td><td class="r">${R(c.amount)}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td></td><td class="r">${R(r.out)}</td></tr></tfoot>`) : `<p class="muted">Tiada duit keluar.</p>`}
+  ${r.budget && r.budget.rows.length ? `<h2>Bajet vs belanja</h2>${tbl(["Kategori", "Bajet (RM)", "Belanja (RM)", "Baki (RM)", "%"], r.budget.rows.map(b => `<tr><td>${esc(b.cat)}</td><td class="r">${R(b.amount)}</td><td class="r">${R(b.spent)}</td><td class="r ${b.left < 0 ? "neg" : "pos"}">${R(b.left)}</td><td class="r">${isFinite(b.pct) ? b.pct.toFixed(0) + "%" : "—"}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td class="r">${R(r.budget.budget)}</td><td class="r">${R(r.budget.spent)}</td><td class="r">${R(r.budget.budget - r.budget.spent)}</td><td class="r">${r.budget.pct.toFixed(0)}%</td></tr></tfoot>`)}${r.budget.unbudgetedTotal ? `<p class="note">Belanja tanpa bajet: ${R(r.budget.unbudgetedTotal)}</p>` : ""}` : ""}
   <h2>Senarai transaksi (${r.rows.length})</h2>
   ${r.rows.length ? tbl(["Tarikh", "Kategori", "Nota", "Cara bayar", "Jumlah (RM)"], r.rows.map(x => `<tr class="${x.bill ? "muted" : ""}"><td>${fmtD(x.date)}</td><td>${esc(x.cat)}</td><td>${esc(x.note)}</td><td>${esc(x.via)}</td><td class="r ${x.type === "in" ? "pos" : x.bill ? "" : "neg"}">${x.type === "in" ? "+" : "−"}${R(x.amount)}</td></tr>`).join("")) + (r.rows.some(x => x.bill) ? `<p class="note">Baris kelabu = bayaran bil kad kredit; tidak dikira dalam Keluar kerana belanja kad sudah dikira.</p>` : "") : `<p class="muted">Tiada transaksi.</p>`}
   ${r.cards.length ? `<h2>Kad kredit</h2>${tbl(["Kad", "Belanja bulan ini (RM)", "Dibayar bulan ini (RM)", "Baki semasa (RM)", "%"], r.cards.map(c => `<tr><td>${esc(c.name)}</td><td class="r">${R(c.spend)}</td><td class="r">${R(c.paid)}</td><td class="r ${c.balance > 0 ? "neg" : "pos"}">${R(c.balance)}</td><td class="r">${c.util.toFixed(0)}%</td></tr>`).join(""))}<p class="note">% = penggunaan had kredit.</p>` : ""}
   ${r.commitments.length || r.debts.length ? `<h2>Komitmen & hutang (${R(r.committed)} sebulan)</h2>${tbl(["Perkara", "Hari bayar", "Status", "Jumlah (RM)"],
       r.commitments.map(c => `<tr><td>${esc(c.name)}</td><td>${c.day || "—"}</td><td>${ok(c.paid)}</td><td class="r">${R(c.amount)}</td></tr>`).join("")
     + r.debts.map(d => `<tr><td>${esc(d.name)} <small class="muted">· baki ${R(d.balance)} · ${d.rate}%</small></td><td>${d.day || "—"}</td><td>${d.balance > 0 ? ok(d.paid) : `<span class="ok">Selesai</span>`}</td><td class="r">${R(d.payment)}</td></tr>`).join(""))}` : ""}
-  <h2>Simpanan</h2>
+  ${r.deposits.length ? `<h2>Rekod simpanan bulan ini</h2>${tbl(["Tarikh", "Akaun", "Jenis", "Nota", "Jumlah"], r.deposits.map(d => `<tr><td>${fmtD(d.date)}</td><td>${KIND_LABEL[d.kind]}</td><td>${d.dir === "out" ? (d.kind === "emas" ? "Jual" : "Keluarkan") : (d.kind === "emas" ? "Beli" : "Simpan")}</td><td>${esc(d.note || "")}</td><td class="r">${d.kind === "emas" ? fmtG(d.grams) + (d.amount ? " · " + R(d.amount) : "") : R(d.amount)}</td></tr>`).join(""))}` : ""}
+  <h2>Simpanan (jumlah semasa)</h2>
   ${tbl(["Perkara", "Ada", "Sasaran", "%"], [
     ["Dana kecemasan · Stage 1 (ASB)", R(r.emergency.asb), R(r.emergency.asbTarget), r.emergency.asbTarget ? Math.min(100, r.emergency.asb / r.emergency.asbTarget * 100) : 0],
     ["Dana kecemasan · Stage 2 (Tabung Haji)", R(r.emergency.th), R(r.emergency.thTarget), r.emergency.thTarget ? Math.min(100, r.emergency.th / r.emergency.thTarget * 100) : 0],
@@ -1003,6 +1216,110 @@ function exportPDF() {
   setTimeout(() => { window.print(); setTimeout(done, 1500); }, 50);
 }
 
+const KIND_LABEL = { emas: "Emas", asb: "ASB", th: "Tabung Haji" };
+function depForm(which) {
+  const gold = which === "emas";
+  return `<form class="add" data-form="deposit" data-kind="${gold ? "emas" : ""}" style="margin-top:10px">
+    ${gold ? "" : `<label>Akaun<select name="kind"><option value="asb">ASB</option><option value="th">Tabung Haji</option></select></label>`}
+    <label>Jenis<select name="dir"><option value="in">${gold ? "Beli" : "Simpan"}</option><option value="out">${gold ? "Jual" : "Keluarkan"}</option></select></label>
+    <label>Tarikh<input name="date" type="date" value="${ymd(today())}" required></label>
+    ${gold ? `<label>Gram<input name="grams" type="number" inputmode="decimal" step="0.001" min="0.001" required placeholder="cth. 1.025"></label>
+      <label>Harga dibayar (RM)<input name="amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="pilihan"></label>`
+      : `<label>Jumlah (RM)<input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" required></label>`}
+    <label>Nota<input name="note" placeholder="${gold ? "cth. Public Gold" : "cth. potongan gaji"}"></label>
+    <label style="grid-column:1/-1;display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" name="totx" checked style="width:20px">Tolak dari baki duit (rekod juga sebagai transaksi Keluar)</label>
+    <button class="primary">${gold ? "Rekod emas" : "Rekod simpanan"}</button>
+  </form>`;
+}
+let depShowAll = {};
+function depList(kinds) {
+  const key = kinds.join(",");
+  const rows = S.deposits.filter(d => kinds.includes(d.kind)).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  if (!rows.length) return `<p class="empty">Belum ada rekod. Baki dikira daripada baki awal + rekod di sini.</p>`;
+  const shown = depShowAll[key] ? rows : rows.slice(0, 5);
+  return `<ul class="list" style="margin-top:6px">${shown.map(d => {
+    const out = d.dir === "out";
+    const main = d.kind === "emas" ? `${out ? "−" : "+"}${fmtG(d.grams)}` : `${out ? "−" : "+"}${RM(d.amount)}`;
+    return `<li><div class="grow"><div>${KIND_LABEL[d.kind]} · ${out ? (d.kind === "emas" ? "jual" : "keluarkan") : (d.kind === "emas" ? "beli" : "simpan")}${d.note ? ` <span class="muted small">· ${esc(d.note)}</span>` : ""}</div><div class="small muted">${fmtD(d.date)}${d.kind === "emas" && d.amount ? " · " + RM(d.amount) : ""}${S.tx.some(t => t.link === "dep:" + d.id) ? " · ditolak dari baki" : ""}</div></div>
+      <span class="num ${out ? "neg" : "pos"}">${main}</span>${del("deposits", d.id)}</li>`;
+  }).join("")}</ul>${rows.length > 5 ? `<button class="ghost sm" data-act="depall" data-key="${key}">${depShowAll[key] ? "Tunjuk 5 terkini" : `Lihat semua (${rows.length})`}</button>` : ""}`;
+}
+
+function loadScript(src) {
+  return new Promise((res, rej) => { const el = document.createElement("script"); el.src = src; el.onload = res; el.onerror = () => rej(new Error("gagal muat")); document.head.appendChild(el); });
+}
+async function exportExcel(all) {
+  const m = all ? "" : reportMonth;
+  const sheets = excelSheets(S, m, today());
+  const fname = "Pelan2030-" + (m || "semua-data") + ".xlsx";
+  try {
+    if (!window.XLSX) { toast("Menyediakan Excel…"); await loadScript("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"); }
+    const X = window.XLSX, wb = X.utils.book_new();
+    for (const sh of sheets) {
+      const rows = sh.rows.map((r, ri) => r.map((v, ci) => (sh.dates || []).includes(ci) && ri > 0 && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T00:00:00") : v));
+      const ws = X.utils.aoa_to_sheet(rows, { cellDates: true });
+      const rng = X.utils.decode_range(ws["!ref"] || "A1");
+      for (let R = 1; R <= rng.e.r; R++) for (let C = 0; C <= rng.e.c; C++) {
+        const cell = ws[X.utils.encode_cell({ r: R, c: C })];
+        if (!cell) continue;
+        if (cell.t === "n" && (sh.money || []).includes(C)) cell.z = "#,##0.00";
+        if (cell.t === "n" && (sh.grams || []).includes(C)) cell.z = "0.000";
+        if (cell.t === "d") cell.z = "dd/mm/yyyy";
+      }
+      ws["!cols"] = (sh.cols || []).map(w => ({ wch: w }));
+      X.utils.book_append_sheet(wb, ws, sh.name);
+    }
+    X.writeFile(wb, fname);
+    toast("Excel dimuat turun: " + fname);
+  } catch (e) {
+    // Luar talian / CDN gagal: eksport CSV (boleh dibuka dalam Excel) — helaian Transaksi sahaja.
+    const csv = "\ufeff" + sheets[1].rows.map(r => r.map(v => { const t = String(v ?? ""); return /[",\n;]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; }).join(",")).join("\r\n");
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = fname.replace(".xlsx", "-transaksi.csv"); document.body.appendChild(a); a.click(); a.remove();
+    toast("Tiada internet untuk Excel penuh — fail CSV transaksi dimuat turun");
+  }
+}
+
+let budgetMonth = ym(new Date());
+const BUDGET_CATS = ["Makan", "Minyak", "Barang dapur", "Rumah", "Utiliti", "Telefon / internet", "Anak / sekolah", "Keluarga", "Pakaian", "Kesihatan", "Hiburan", "Sedekah", "Lain-lain"];
+function budgetBar(r) {
+  const cls = r.level === "lebih" ? "" : r.level === "hampir" ? "amber" : "";
+  const col = r.level === "lebih" ? "var(--bad)" : r.level === "hampir" ? "var(--warn)" : "var(--teal)";
+  return `<div class="bar ${cls}" role="progressbar" aria-valuenow="${Math.round(Math.min(r.pct, 999))}" aria-valuemin="0" aria-valuemax="100"><i style="width:${Math.min(100, r.pct)}%;background:${col}"></i></div>`;
+}
+function vBudget() {
+  const b = budgetStatus(S, budgetMonth);
+  const cats = [...new Set([...BUDGET_CATS, ...S.tx.filter(t => t.type === "out" && t.cat !== "Kad kredit").map(t => t.cat), ...S.cardTx.filter(t => t.type === "belanja").map(t => t.cat)].filter(Boolean).map(c => String(c).trim()))];
+  const pillB = r => r.level === "lebih" ? `<span class="pill bad">Lebih ${RM(-r.left)}</span>` : r.level === "hampir" ? `<span class="pill warn">Baki ${RM(r.left)}</span>` : `<span class="pill ok">Baki ${RM(r.left)}</span>`;
+  return `<section class="card" id="bajet">
+    <div class="row between"><h2>Bajet bulanan</h2>${monthSelect("budgetmonth", budgetMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace(/<option value="" (selected)?>Semua bulan<\/option>/, "")}</div>
+    ${S.budgets.length ? `<div class="row between small" style="margin-top:4px"><span>Belanja ${RM(b.spent)} / bajet ${RM(b.budget)}</span><span>${b.pct.toFixed(0)}%</span></div>
+    ${budgetBar({ pct: b.pct, level: b.pct > 100 ? "lebih" : b.pct >= 80 ? "hampir" : "ok" })}
+    <ul class="list" style="margin-top:8px">${b.rows.map(r => `<li style="align-items:flex-start"><div class="grow">
+        <div class="row between"><span>${esc(r.cat)}</span>${pillB(r)}</div>
+        <div class="row between small muted" style="margin:2px 0 4px"><span>${RM(r.spent)} / ${RM(r.amount)}</span><span>${isFinite(r.pct) ? r.pct.toFixed(0) + "%" : "—"}</span></div>
+        ${budgetBar(r)}
+      </div>
+      <input type="number" inputmode="decimal" step="0.01" min="0" value="${r.amount}" data-act="budgetamt" data-id="${r.id}" aria-label="Bajet ${esc(r.cat)}" style="width:96px">
+      ${del("budgets", r.id)}</li>`).join("")}</ul>` : `<p class="empty">Belum ada bajet. Tetapkan had sebulan bagi setiap kategori — belanja tunai dan kad kredit dikira automatik.</p>`}
+    ${b.unbudgeted.length ? `<p class="small muted" style="margin:10px 0 4px">Belanja tanpa bajet: <b>${RM(b.unbudgetedTotal)}</b> — ${b.unbudgeted.slice(0, 6).map(u => `<button class="ghost sm" data-act="budgetquick" data-cat="${esc(u.cat)}" data-amt="${Math.ceil(u.spent / 10) * 10}" title="Tambah bajet">${esc(u.cat)} ${RM(u.spent)} ＋</button>`).join(" ")}</p>` : ""}
+    <form class="add" data-form="budget">
+      <label>Kategori<input name="cat" list="budgetcats" required placeholder="cth. Makan"></label>
+      <label>Bajet sebulan (RM)<input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" required></label>
+      <button class="primary">Tetapkan bajet</button>
+    </form>
+    <datalist id="budgetcats">${cats.map(c => `<option value="${esc(c)}">`).join("")}</datalist>
+    <p class="small muted">Nama kategori mesti sama dengan kategori transaksi (huruf besar/kecil tidak penting). Bajet berulang setiap bulan.</p>
+  </section>`;
+}
+// Amaran selepas rekod belanja jika bajet kategori itu hampir habis / lebih.
+function budgetWarn(cat, date) {
+  const m = String(date).slice(0, 7);
+  const r = budgetStatus(S, m).rows.find(x => catKey(x.cat) === catKey(cat));
+  if (!r || r.level === "ok") return "";
+  return r.level === "lebih" ? ` · ⚠️ Bajet ${r.cat} lebih ${RM(-r.left)}` : ` · Bajet ${r.cat} ${r.pct.toFixed(0)}% digunakan`;
+}
+
 function vKewangan() {
   const c = calc(S), t = today();
   const inSel = x => !txMonth || String(x.date).slice(0, 7) === txMonth;
@@ -1012,16 +1329,19 @@ function vKewangan() {
   const isBill = r => !r._card && r.type === "out" && r.cat === "Kad kredit";
   const tin = sum(rows.filter(r => !r._card && r.type === "in"), r => r.amount);
   const tout = sum(rows.filter(r => r._card || (r.type === "out" && !isBill(r))), r => r.amount);
-  const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
+  const gs = savCalc(goldHave(S), S.gold.target, S.gold.by, t);
   const { s1, s2, stage } = emergencyCalc(S, t);
   const stLine = (sv, label) => sv.need ? `Perlu ${RM(sv.need)} lagi · ${isFinite(sv.perMonth) ? RM(sv.perMonth) + " sebulan" : "tarikh sasaran sudah lepas"}` : label + " tercapai ✓";
   const pill = n => stage === n ? `<span class="pill warn">Sedang dibina</span>` : stage > n ? `<span class="pill ok">Selesai</span>` : `<span class="pill">Seterusnya</span>`;
   return `
   <section class="card">
-    <h2>Laporan bulanan</h2>
-    <p class="small muted">Eksport ringkasan, kategori, transaksi, kad kredit, komitmen dan simpanan bagi sebulan. Dalam dialog cetak, pilih <b>Simpan sebagai PDF</b>.</p>
-    <div class="row">${monthSelect("reportmonth", reportMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace('<option value="" selected>Semua bulan</option>', "").replace('<option value="" >Semua bulan</option>', "")}<button class="primary" data-act="pdf">Eksport PDF</button></div>
+    <h2>Laporan & eksport</h2>
+    <p class="small muted"><b>PDF</b>: laporan sebulan (dalam dialog cetak pilih <b>Simpan sebagai PDF</b>). <b>Excel</b>: fail .xlsx dengan helaian Ringkasan, Transaksi, Kad kredit, Simpanan dan Komitmen & hutang.</p>
+    <div class="row">${monthSelect("reportmonth", reportMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace('<option value="" selected>Semua bulan</option>', "").replace('<option value="" >Semua bulan</option>', "")}<button class="primary" data-act="pdf">Eksport PDF</button><button data-act="xlsx">Eksport Excel</button></div>
+    <button class="ghost sm" data-act="xlsxall" style="margin-top:6px">Excel semua data</button>
   </section>
+
+  ${vBudget()}
 
   <section class="card">
     <h2>Sumber pendapatan</h2>
@@ -1057,16 +1377,20 @@ function vKewangan() {
 
   <section class="card">
     <h2>Sasaran emas</h2>
-    <div class="row between small"><span>${fmtG(S.gold.have)} / ${fmtG(S.gold.target)} · nilai ${RM(S.gold.have * S.gold.price)}</span><span>${gs.pct.toFixed(0)}%</span></div>
+    <div class="row between small"><span>${fmtG(goldHave(S))} / ${fmtG(S.gold.target)}${S.gold.price ? ` · nilai ${RM(goldHave(S) * S.gold.price)}` : ""}</span><span>${gs.pct.toFixed(0)}%</span></div>
     ${bar(gs.pct, "gold")}
     <p class="small muted">${gs.need ? `Perlu ${fmtG(gs.need)} lagi · ${isFinite(gs.perMonth) ? fmtG(gs.perMonth) + " sebulan" : "tarikh sasaran sudah lepas"}${S.gold.price ? ` (≈ ${RM(gs.perMonth * S.gold.price)})` : ""}` : "Sasaran tercapai 🎉"}</p>
+    ${goldCost(S) ? `<p class="small muted" style="margin-top:-6px">Kos belian direkod ${RM(goldCost(S))}${depTotal(S, "emas") > 0 ? ` · purata ${RM(goldCost(S) / sum(S.deposits.filter(d => d.kind === "emas" && d.dir !== "out"), d => d.grams))}/g` : ""}</p>` : ""}
+    ${depForm("emas")}
+    ${depList(["emas"])}
+    <details style="margin-top:10px"><summary>Tetapan emas (baki awal, sasaran, harga semasa)</summary>
     <form class="add" data-form="gold">
-      <label>Ada (gram)<input name="have" type="number" inputmode="decimal" step="0.001" min="0" value="${S.gold.have}"></label>
+      <label>Baki awal sebelum rekod (gram)<input name="have" type="number" inputmode="decimal" step="0.001" min="0" value="${S.gold.have}"></label>
       <label>Sasaran (gram)<input name="target" type="number" inputmode="decimal" step="0.001" min="0" value="${S.gold.target}"></label>
-      <label>Harga RM/gram<input name="price" type="number" inputmode="decimal" step="0.01" min="0" value="${S.gold.price}"></label>
+      <label>Harga semasa RM/gram<input name="price" type="number" inputmode="decimal" step="0.01" min="0" value="${S.gold.price}"></label>
       <label>Menjelang<input name="by" type="month" value="${S.gold.by}"></label>
       <button>Simpan</button>
-    </form>
+    </form></details>
   </section>
 
   <section class="card">
@@ -1077,23 +1401,26 @@ function vKewangan() {
 
     <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
       <div class="row between"><h3 style="margin:0">Stage 1 (ASB) · ${RM(S.asb.s1)}</h3>${pill(1)}</div>
-      <div class="row between small" style="margin-top:6px"><span>${RM(S.asb.have)} / ${RM(S.asb.s1)} menjelang ${fmtYM(S.asb.s1by)}</span><span>${s1.pct.toFixed(0)}%</span></div>
+      <div class="row between small" style="margin-top:6px"><span>${RM(asbHave(S))} / ${RM(S.asb.s1)} menjelang ${fmtYM(S.asb.s1by)}</span><span>${s1.pct.toFixed(0)}%</span></div>
       ${bar(s1.pct, "amber")}
       <p class="small muted">${stLine(s1, "Stage 1")}</p>
     </div>
     <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
       <div class="row between"><h3 style="margin:0">Stage 2 (Tabung Haji) · ${RM(S.th.target)}</h3>${pill(2)}</div>
-      <div class="row between small" style="margin-top:6px"><span>${RM(S.th.have)} / ${RM(S.th.target)} menjelang ${fmtYM(S.th.by)}</span><span>${s2.pct.toFixed(0)}%</span></div>
+      <div class="row between small" style="margin-top:6px"><span>${RM(thHave(S))} / ${RM(S.th.target)} menjelang ${fmtYM(S.th.by)}</span><span>${s2.pct.toFixed(0)}%</span></div>
       ${bar(s2.pct, "gold")}
       <p class="small muted">${stLine(s2, "Stage 2")}</p>
     </div>
 
-    <details style="margin-top:12px"><summary>Kemas kini baki & sasaran</summary>
+    <h3 style="margin-top:16px">Rekod simpanan ASB / Tabung Haji</h3>
+    ${depForm("dana")}
+    ${depList(["asb", "th"])}
+    <details style="margin-top:12px"><summary>Tetapan (baki awal & sasaran)</summary>
     <form class="add" data-form="emergency">
-      <label>Baki ASB (RM)<input name="asbHave" type="number" inputmode="decimal" step="0.01" min="0" value="${S.asb.have}"></label>
+      <label>Baki awal ASB sebelum rekod (RM)<input name="asbHave" type="number" inputmode="decimal" step="0.01" min="0" value="${S.asb.have}"></label>
       <label>Sasaran stage 1 (RM)<input name="s1" type="number" inputmode="decimal" step="0.01" min="0" value="${S.asb.s1}"></label>
       <label>Stage 1 menjelang<input name="s1by" type="month" value="${S.asb.s1by}"></label>
-      <label>Baki Tabung Haji (RM)<input name="thHave" type="number" inputmode="decimal" step="0.01" min="0" value="${S.th.have}"></label>
+      <label>Baki awal Tabung Haji sebelum rekod (RM)<input name="thHave" type="number" inputmode="decimal" step="0.01" min="0" value="${S.th.have}"></label>
       <label>Sasaran stage 2 (RM)<input name="thTarget" type="number" inputmode="decimal" step="0.01" min="0" value="${S.th.target}"></label>
       <label>Stage 2 menjelang<input name="thBy" type="month" value="${S.th.by}"></label>
       <label>Simpanan tunai lain (RM)<input name="savings" type="number" inputmode="decimal" step="0.01" min="0" value="${S.savings}"></label>
@@ -1376,6 +1703,7 @@ function vTrash() {
 function vTetapan() {
   return `
   ${vCloud()}
+  ${vEmailAuto()}
   <section class="card">
     <h2>Profil</h2>
     <form class="add" data-form="settings">
@@ -1408,6 +1736,81 @@ function payPill(st) {
 const cardName = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
 
 const VIEWS = { ringkasan: vRingkasan, kewangan: vKewangan, hutang: vHutang, pelan: vPelan, niaga: vNiaga, tetapan: vTetapan };
+
+// Rekod satu transaksi (dikongsi oleh borang Kewangan & butang pantas ＋).
+function recordTx(d) {
+  const amount = num(d.amount), cat = String(d.cat || "").trim() || (d.type === "in" ? "Masuk" : "Lain-lain"), note = String(d.note || "").trim();
+  if (d.via && d.type === "out" && S.cards.some(c => c.id === d.via)) {
+    S.cardTx.push({ id: uid(), cardId: d.via, date: d.date, type: "belanja", amount, cat, note });
+    return "Direkod pada kad " + cardName(d.via) + " — belum bayar" + budgetWarn(cat, d.date);
+  }
+  S.tx.push({ id: uid(), date: d.date, type: d.type, cat, amount, note });
+  return (d.type === "in" ? "Duit masuk " : "Duit keluar ") + RM(amount) + " direkod" + (d.type === "out" ? budgetWarn(cat, d.date) : "");
+}
+// Kategori untuk cip: kategori bajet + yang paling kerap digunakan (90 hari) + lalai.
+function quickCats(type) {
+  if (type === "in") return [...new Set([...S.tx.filter(t => t.type === "in").map(t => t.cat), "Gaji", "Sampingan", "Pasif", "Hadiah", "Lain-lain"].filter(Boolean).map(c => String(c).trim()))].slice(0, 8);
+  const since = ymd(new Date(Date.now() - 90 * 864e5)), freq = {};
+  for (const t of [...S.tx.filter(t => t.type === "out" && t.cat !== "Kad kredit"), ...S.cardTx.filter(t => t.type === "belanja")])
+    if (String(t.date) >= since) { const k = String(t.cat || "").trim(); if (k) freq[k] = (freq[k] || 0) + 1; }
+  const top = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(x => x[0]);
+  const seen = new Set(), out = [];
+  for (const c of [...S.budgets.map(b => b.cat), ...top, "Makan", "Minyak", "Barang dapur", "Bil", "Lain-lain"]) { const k = catKey(c); if (c && !seen.has(k)) { seen.add(k); out.push(String(c).trim()); } }
+  return out.slice(0, 10);
+}
+let Q = null; // keadaan butang pantas
+function openQuick(type = "out") {
+  Q = { type, cat: "", via: "", date: ymd(today()) };
+  renderQuick();
+  const a = document.querySelector("#sheet .amt"); if (a) setTimeout(() => a.focus(), 60);
+}
+function closeQuick() { Q = null; const sh = document.getElementById("sheet"); sh.hidden = true; sh.innerHTML = ""; }
+function renderQuick() {
+  const sh = document.getElementById("sheet");
+  if (!Q) return closeQuick();
+  const amtVal = (sh.querySelector(".amt") || {}).value || "", noteVal = (sh.querySelector("[name=qnote]") || {}).value || "";
+  const cats = quickCats(Q.type);
+  sh.innerHTML = `<div class="panel" role="dialog" aria-modal="true" aria-label="Rekod transaksi">
+    <div class="grab"></div>
+    <div class="seg"><button type="button" data-q="type" data-v="out" aria-pressed="${Q.type === "out"}">Duit keluar</button><button type="button" class="in" data-q="type" data-v="in" aria-pressed="${Q.type === "in"}">Duit masuk</button></div>
+    <form id="quickForm">
+      <input class="amt" name="qamt" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="RM 0.00" required value="${esc(amtVal)}" aria-label="Jumlah (RM)">
+      <div class="small muted">Kategori</div>
+      <div class="chips">${cats.map(c => `<button type="button" data-q="cat" data-v="${esc(c)}" aria-pressed="${!!Q.cat && catKey(c) === catKey(Q.cat)}">${esc(c)}</button>`).join("")}</div>
+      <input name="qcat" list="cats" placeholder="atau taip kategori lain" value="${esc(Q.cat)}" aria-label="Kategori">
+      ${Q.type === "out" && S.cards.length ? `<div class="small muted" style="margin-top:10px">Bayar guna</div>
+      <div class="chips"><button type="button" data-q="via" data-v="" aria-pressed="${!Q.via}">Tunai / debit</button>${S.cards.map(c => `<button type="button" data-q="via" data-v="${c.id}" aria-pressed="${Q.via === c.id}">💳 ${esc(c.name)}</button>`).join("")}</div>` : ""}
+      <div class="grid2" style="margin-top:10px">
+        <label>Nota<input name="qnote" value="${esc(noteVal)}" placeholder="pilihan"></label>
+        <label>Tarikh<input name="qdate" type="date" value="${Q.date}" required></label>
+      </div>
+      <div class="row" style="margin-top:14px"><button type="button" data-q="close" style="flex:1">Batal</button><button class="primary" style="flex:2">Simpan</button></div>
+    </form>
+  </div>`;
+  sh.hidden = false;
+}
+document.addEventListener("click", e => {
+  const sh = document.getElementById("sheet");
+  if (!Q) return;
+  if (e.target === sh) return closeQuick();
+  const b = e.target.closest("[data-q]"); if (!b) return;
+  const f = document.getElementById("quickForm");
+  const keep = () => { Q.cat = f.qcat.value; Q.date = f.qdate.value; };
+  if (b.dataset.q === "close") return closeQuick();
+  keep();
+  if (b.dataset.q === "type") { Q.type = b.dataset.v; Q.via = ""; }
+  if (b.dataset.q === "cat") Q.cat = b.dataset.v;
+  if (b.dataset.q === "via") Q.via = b.dataset.v;
+  renderQuick();
+});
+document.addEventListener("submit", e => {
+  if (e.target.id !== "quickForm") return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  const f = e.target;
+  const msg = recordTx({ type: Q.type, amount: f.qamt.value, cat: f.qcat.value, note: f.qnote.value, date: f.qdate.value, via: Q.type === "out" ? Q.via : "" });
+  closeQuick(); commit(); toast(msg);
+}, true);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && Q) closeQuick(); });
 
 function render() {
   if (!VIEWS[tab]) tab = "ringkasan";
@@ -1457,13 +1860,23 @@ document.addEventListener("submit", e => {
   }
   switch (f.dataset.form) {
     case "income": S.incomes.push({ id: uid(), name: d.name.trim(), type: d.type, amount: num(d.amount) }); break;
-    case "tx":
-      if (d.via && d.type === "out" && S.cards.some(c => c.id === d.via)) {
-        S.cardTx.push({ id: uid(), cardId: d.via, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() });
-        toast("Direkod pada kad " + cardName(d.via) + " — belum bayar");
-      } else S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() });
+    case "tx": {
+      const msg = recordTx(d);
+      if (d.via || / · /.test(msg)) toast(msg);
       if (txMonth) txMonth = d.date.slice(0, 7);
       break;
+    }
+    case "deposit": {
+      const kind = f.dataset.kind || d.kind;
+      const out = d.dir === "out";
+      const dep = { id: uid(), kind, dir: out ? "out" : "in", date: d.date, amount: num(d.amount), note: (d.note || "").trim() };
+      if (kind === "emas") dep.grams = num(d.grams);
+      S.deposits.push(dep);
+      if (d.totx && !out && dep.amount > 0)
+        S.tx.push({ id: uid(), date: dep.date, type: "out", cat: KIND_LABEL[kind], amount: dep.amount, note: dep.note || (kind === "emas" ? fmtG(dep.grams) : "Simpanan"), link: "dep:" + dep.id });
+      toast(`${KIND_LABEL[kind]}: ${kind === "emas" ? (out ? "−" : "+") + fmtG(dep.grams) : (out ? "−" : "+") + RM(dep.amount)} direkod`);
+      break;
+    }
     case "gold": Object.assign(S.gold, { have: num(d.have), target: num(d.target), price: num(d.price), by: d.by || S.gold.by }); toast("Disimpan"); break;
     case "emergency":
       Object.assign(S.asb, { have: num(d.asbHave), s1: num(d.s1), s1by: d.s1by || S.asb.s1by });
@@ -1480,7 +1893,13 @@ document.addEventListener("submit", e => {
       if (num(d.opening) > 0) S.cardTx.push({ id: uid(), cardId: card.id, date: ymd(today()), type: "awal", amount: num(d.opening), cat: "Baki awal", note: "" });
       break;
     }
-    case "cardtx": S.cardTx.push({ id: uid(), cardId: d.cardId, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() }); if (cardMonth) cardMonth = d.date.slice(0, 7); toast("Belanja kad direkod"); break;
+    case "cardtx": S.cardTx.push({ id: uid(), cardId: d.cardId, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() }); if (cardMonth) cardMonth = d.date.slice(0, 7); toast("Belanja kad direkod" + budgetWarn(d.cat, d.date)); break;
+    case "budget": {
+      const cat = d.cat.trim(), ex = S.budgets.find(x => catKey(x.cat) === catKey(cat));
+      if (ex) { ex.amount = num(d.amount); toast("Bajet " + ex.cat + " dikemas kini"); }
+      else { S.budgets.push({ id: uid(), cat, amount: num(d.amount) }); toast("Bajet " + cat + " ditetapkan"); }
+      break;
+    }
     case "cardpay": {
       const card = S.cards.find(x => x.id === f.dataset.id); const amt = num(d.amount);
       if (card && amt > 0) {
@@ -1497,15 +1916,22 @@ document.addEventListener("submit", e => {
 
 document.addEventListener("click", e => {
   const tb = e.target.closest("[data-tab]");
-  if (tb) { tab = tb.dataset.tab; try { localStorage.setItem(KEY + ":tab", tab); } catch {} render(); window.scrollTo(0, 0); return; }
+  if (tb) { tab = tb.dataset.tab; try { localStorage.setItem(KEY + ":tab", tab); } catch {} render(); window.scrollTo(0, 0);
+    if (tb.dataset.goto) { const g = document.getElementById(tb.dataset.goto); if (g) g.scrollIntoView(); }
+    return; }
   const b = e.target.closest("button[data-act]"); if (!b) return;
   const { act, id } = b.dataset;
   switch (act) {
     case "del": if (confirm(b.dataset.list === "cards" ? "Padam kad ini dan semua rekod penggunaannya?" : "Padam item ini?")) {
-      const list = b.dataset.list;
-      if (trashItem(S, list, id, Date.now())) {
+      const list = b.dataset.list, now = Date.now();
+      const linked = list === "deposits" ? S.tx.filter(t => t.link === "dep:" + id).map(t => t.id) : [];
+      if (trashItem(S, list, id, now)) {
+        linked.forEach(tid => trashItem(S, "tx", tid, now));
         commit();
-        toastUndo(`${LIST_LABEL[list] || "Item"} dipadam`, () => { if (restoreItem(S, id)) { commit(); toast("Dipulihkan"); } });
+        toastUndo(`${LIST_LABEL[list] || "Item"} dipadam${linked.length ? " (bersama transaksinya)" : ""}`, () => {
+          const okR = restoreItem(S, id); linked.forEach(tid => restoreItem(S, "" + tid));
+          if (okR) { commit(); toast("Dipulihkan"); }
+        });
       }
     } break;
     case "pay": {
@@ -1533,6 +1959,14 @@ document.addEventListener("click", e => {
       break;
     }
     case "pdf": exportPDF(); break;
+    case "emailtok": makeEmailToken(); break;
+    case "emailcopy": copyEmailScript(); break;
+    case "emailrevoke": if (confirm("Batalkan kod? Skrip Gmail yang sedia ada akan berhenti mencatat.")) revokeEmailToken(); break;
+    case "quick": openQuick("out"); break;
+    case "xlsx": exportExcel(false); break;
+    case "xlsxall": exportExcel(true); break;
+    case "budgetquick": if (!S.budgets.some(x => catKey(x.cat) === catKey(b.dataset.cat))) { S.budgets.push({ id: uid(), cat: b.dataset.cat, amount: num(b.dataset.amt) }); commit(); toast("Bajet " + b.dataset.cat + " ditetapkan " + RM(num(b.dataset.amt)) + " — ubah jika perlu"); } break;
+    case "depall": depShowAll[b.dataset.key] = !depShowAll[b.dataset.key]; render(); break;
     case "restore1": if (restoreItem(S, id)) { commit(); toast("Dipulihkan"); } break;
     case "emptytrash": if (confirm("Kosongkan tong sampah? Item di dalamnya tidak boleh dipulihkan lagi.")) { S.trash = {}; commit(); } break;
     case "scanlost": scanLost(); break;
@@ -1573,6 +2007,8 @@ document.addEventListener("change", e => {
   const act = el.dataset.act; if (!act) return;
   if (act === "txmonth") { txMonth = el.value; render(); }
   if (act === "reportmonth" && el.value) { reportMonth = el.value; }
+  if (act === "budgetmonth" && el.value) { budgetMonth = el.value; render(); }
+  if (act === "budgetamt") { const x = S.budgets.find(y => y.id === el.dataset.id); if (x && num(el.value) >= 0) { x.amount = num(el.value); commit(); } }
   if (act === "sumyear") { sumYear = num(el.value); render(); }
   if (act === "trendsel") { trendSel = el.value; render(); }
   if (act === "cardmonth") { cardMonth = el.value; render(); }
@@ -1586,6 +2022,8 @@ document.addEventListener("change", e => {
 window.addEventListener("storage", e => { if (e.key === KEY) { S = load(); render(); } });
 render();
 initCloud();
+{ const q = new URLSearchParams(location.search).get("tambah");
+  if (q === "keluar" || q === "masuk") { openQuick(q === "masuk" ? "in" : "out"); history.replaceState(null, "", location.pathname); } }
 syncReminders();
 if (S.settings.notify) registerPeriodic();
 

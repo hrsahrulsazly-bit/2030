@@ -44,7 +44,8 @@ h1,h2,h3{font-family:"Bricolage Grotesque",system-ui,sans-serif;line-height:1.15
 h1{font-size:1.6rem} h2{font-size:1.2rem} h3{font-size:1rem}
 main{max-width:760px;margin:0 auto;padding:calc(16px + env(safe-area-inset-top)) 16px 16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:0 0 14px;box-shadow:var(--shadow)}
-.muted{color:var(--muted)} .small{font-size:.85rem}
+.muted{color:var(--muted)}
+.num.muted{color:var(--muted)} .small{font-size:.85rem}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .between{justify-content:space-between}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -101,6 +102,36 @@ svg.chart text{fill:var(--muted);font-size:10px;font-family:"IBM Plex Sans",sans
 .toast.undo button{background:transparent;border:1px solid currentColor;color:var(--paper);font-weight:700;padding:5px 12px}
 .toast{max-width:calc(100vw - 32px);position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:8px 14px;border-radius:10px;font-size:.9rem;z-index:20}
 @media (prefers-reduced-motion:no-preference){.bar>i{transition:width .4s ease}}
+#printArea{display:none}
+@media print{
+  @page{size:A4;margin:14mm 12mm}
+  html,body{background:#fff!important;padding:0!important}
+  body>*:not(#printArea){display:none!important}
+  #printArea{display:block;color:#17263A;font:10.5pt/1.45 "IBM Plex Sans",system-ui,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .rp header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #7A1F2B;padding-bottom:8px;margin-bottom:12px}
+  .rp h1{font:700 18pt "Bricolage Grotesque",sans-serif;margin:0;color:#7A1F2B}
+  .rp .sub{font-size:11pt;color:#5A6676}
+  .rp .brand{font:700 10pt "Bricolage Grotesque",sans-serif;color:#7A1F2B;border:2px dashed #7A1F2B;border-radius:6px;padding:3px 8px;transform:rotate(-3deg)}
+  .rp h2{font:700 12pt "Bricolage Grotesque",sans-serif;margin:16px 0 6px;color:#17263A;break-after:avoid}
+  .rp .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .rp .kpi div{border:1px solid #D3DAD5;border-radius:8px;padding:8px 10px;background:#F4F7F5}
+  .rp .kpi span{display:block;font-size:8.5pt;color:#5A6676}
+  .rp .kpi b{font:700 13pt "Bricolage Grotesque",sans-serif}
+  .rp .kpi small{display:block;font-size:8pt;color:#5A6676}
+  .rp table{width:100%;border-collapse:collapse;font-size:9.5pt}
+  .rp th{text-align:left;font-weight:600;color:#5A6676;border-bottom:1.5px solid #17263A;padding:4px 6px}
+  .rp td{border-bottom:1px solid #E2E7E4;padding:4px 6px;vertical-align:top}
+  .rp tr{break-inside:avoid}
+  .rp tfoot td{font-weight:700;border-top:1.5px solid #17263A;border-bottom:0}
+  .rp .r{text-align:right;white-space:nowrap}
+  .rp .pos,.rp .ok{color:#2C6B66}.rp .neg,.rp .bad{color:#7A1F2B}
+  .rp .ok,.rp .bad{font-weight:600}
+  .rp .muted,.rp tr.muted td{color:#8A94A0}
+  .rp .bar{height:4px;background:#E2E7E4;border:0;border-radius:2px;margin-top:3px;max-width:60%}
+  .rp .bar i{display:block;height:100%;background:#7A1F2B;border-radius:2px}
+  .rp .note{font-size:8.5pt;color:#5A6676;margin:4px 0 0}
+  .rp footer{margin-top:18px;padding-top:6px;border-top:1px solid #D3DAD5;font-size:8pt;color:#8A94A0}
+}
 </style>
 </head>
 <body>
@@ -331,6 +362,61 @@ function trendMonths(sel, today) {
   const n = Number(sel) || 6, out = [];
   for (let i = n - 1; i >= 0; i--) out.push(ym(new Date(today.getFullYear(), today.getMonth() - i, 1)));
   return out;
+}
+
+// Status bayaran setiap belanja kad: bayaran kad menutup belanja paling lama dahulu (FIFO).
+function cardAlloc(S, cardId) {
+  const rows = S.cardTx.filter(t => t.cardId === cardId);
+  let pay = sum(rows.filter(t => t.type === "bayar"), t => t.amount);
+  const debits = rows.filter(t => t.type === "belanja" || t.type === "awal")
+    .map((t, i) => [t, i]).sort((a, b) => String(a[0].date).localeCompare(String(b[0].date)) || a[1] - b[1]).map(x => x[0]);
+  const out = {};
+  for (const t of debits) {
+    const amt = Number(t.amount) || 0, covered = Math.min(amt, pay);
+    pay -= covered;
+    const owed = Math.round((amt - covered) * 100) / 100;
+    out[t.id] = { covered, owed, status: owed <= 0 ? "dibayar" : covered > 0 ? "separa" : "belum" };
+  }
+  return out;
+}
+// Tarikh akhir bayaran kad yang seterusnya (hari ini atau selepas).
+function nextDue(dueDay, today) {
+  const day = Number(dueDay);
+  if (!(day >= 1 && day <= 31)) return null;
+  const t0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  for (const off of [0, 1]) {
+    const y = t0.getFullYear(), m = t0.getMonth() + off;
+    const d = new Date(y, m, Math.min(day, dim(new Date(y, m, 1).getFullYear(), new Date(y, m, 1).getMonth())));
+    if (d >= t0) return { date: ymd(d), diff: Math.round((d - t0) / 86400000) };
+  }
+  return null;
+}
+
+// Data laporan bulanan (m = "YYYY-MM"). Definisi sama dengan ringkasan: bayaran bil kad tidak dikira dalam Keluar.
+function monthReport(S, m, today) {
+  const inM = t => String(t.date).slice(0, 7) === m;
+  const cardNm = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
+  const flow = monthFlow(S, m);
+  const rows = [
+    ...S.tx.filter(inM).map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: t.type, amount: Number(t.amount) || 0,
+      via: t.type === "in" ? "" : t.cat === "Kad kredit" ? "Bayar bil kad" : "Tunai / debit", bill: t.type === "out" && t.cat === "Kad kredit" })),
+    ...S.cardTx.filter(t => t.type === "belanja" && inM(t)).map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: "out", amount: Number(t.amount) || 0, via: "Kad " + cardNm(t.cardId), bill: false }))
+  ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const byCatObj = {};
+  for (const r of rows) if (r.type === "out" && !r.bill) { const c = String(r.cat || "Lain-lain").trim() || "Lain-lain"; byCatObj[c] = (byCatObj[c] || 0) + r.amount; }
+  const byCat = Object.entries(byCatObj).sort((a, b) => b[1] - a[1]).map(([cat, amount]) => ({ cat, amount, pct: flow.out ? amount / flow.out * 100 : 0 }));
+  const commitments = S.commitments.map(c => ({ name: c.name, amount: Number(c.amount) || 0, day: c.day, paid: !!S.paid[c.id + ":" + m] }));
+  const debts = S.debts.map(d => ({ name: d.name, balance: Number(d.balance) || 0, rate: Number(d.rate) || 0, payment: Number(d.payment) || 0, day: d.day, paid: !!S.paid[d.id + ":" + m] }));
+  const cards = S.cards.map(c => {
+    const t = S.cardTx.filter(x => x.cardId === c.id && inM(x));
+    const k = cardCalc(S, c, today);
+    return { name: c.name, spend: sum(t.filter(x => x.type === "belanja"), x => x.amount), paid: sum(t.filter(x => x.type === "bayar"), x => x.amount), balance: k.balance, limit: k.limit, util: k.util };
+  });
+  const c = calc(S), e = emergencyCalc(S, today);
+  return { m, in: flow.in, out: flow.out, net: flow.in - flow.out, byCat, rows, commitments, debts, cards,
+    committed: c.out, dsr: c.dsr, dsrLevel: c.dsrLevel,
+    emergency: { asb: Number(S.asb.have) || 0, asbTarget: Number(S.asb.s1) || 0, th: Number(S.th.have) || 0, thTarget: Number(S.th.target) || 0, stage: e.stage },
+    gold: { have: Number(S.gold.have) || 0, target: Number(S.gold.target) || 0 } };
 }
 
 // ---------- tong sampah & pulih ----------
@@ -710,6 +796,7 @@ async function initCloud() {
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && sbUser) syncNow(); });
 }
 function toast(msg) {
+  document.querySelectorAll(".toast:not(.undo)").forEach(x => x.remove());
   const el = document.createElement("div"); el.className = "toast"; el.role = "status"; el.textContent = msg;
   document.body.appendChild(el); setTimeout(() => el.remove(), 2200);
 }
@@ -816,6 +903,11 @@ function vRingkasan() {
     ${bar(c.passivePct)}
   </section>
 
+  ${S.cards.length ? `<section class="card">
+    <h2>Kad kredit</h2>
+    <ul class="list">${S.cards.map(cd => { const k = cardCalc(S, cd, t); return `<li><div class="grow"><div>💳 ${esc(cd.name)}</div>${cardDueLine(cd, k)}</div>${k.balance > 0 ? `<button class="sm" data-tab="hutang">Bayar</button>` : ""}</li>`; }).join("")}</ul>
+  </section>` : ""}
+
   <section class="card">
     <h2>Peringatan bayaran (14 hari)</h2>
     ${up.length ? `<ul class="list">${up.map(u => `<li><div class="grow"><div>${esc(u.name)}</div>
@@ -866,15 +958,69 @@ const withMonthHeads = (rows, all, item) => rows.map((r, i) => {
   return head + item(r);
 }).join("");
 
+let reportMonth = ym(new Date());
+function reportHTML(r) {
+  const R = n => "RM " + (Number(n) || 0).toLocaleString("ms-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const now = new Date().toLocaleString("ms-MY", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const tbl = (head, body, foot = "") => `<table><thead><tr>${head.map(h => `<th class="${h.endsWith("(RM)") || h === "%" ? "r" : ""}">${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody>${foot}</table>`;
+  const ok = b => b ? `<span class="ok">Sudah bayar</span>` : `<span class="bad">Belum bayar</span>`;
+  return `<div class="rp">
+  <header><div><h1>Laporan kewangan bulanan</h1><div class="sub">${fmtYM(r.m)}${S.settings.name ? " · " + esc(S.settings.name) : ""}</div></div><div class="brand">Pelan 2030</div></header>
+  <div class="kpi">
+    <div><span>Masuk</span><b class="pos">${R(r.in)}</b></div>
+    <div><span>Keluar</span><b class="neg">${R(r.out)}</b></div>
+    <div><span>Bersih</span><b class="${r.net >= 0 ? "pos" : "neg"}">${R(r.net)}</b></div>
+    <div><span>DSR</span><b>${isFinite(r.dsr) ? r.dsr.toFixed(0) + "%" : "—"}</b><small>${r.dsrLevel}</small></div>
+  </div>
+  <h2>Duit keluar ikut kategori</h2>
+  ${r.byCat.length ? tbl(["Kategori", "%", "Jumlah (RM)"], r.byCat.map(c => `<tr><td>${esc(c.cat)}<div class="bar"><i style="width:${c.pct.toFixed(1)}%"></i></div></td><td class="r">${c.pct.toFixed(0)}%</td><td class="r">${R(c.amount)}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td></td><td class="r">${R(r.out)}</td></tr></tfoot>`) : `<p class="muted">Tiada duit keluar.</p>`}
+  <h2>Senarai transaksi (${r.rows.length})</h2>
+  ${r.rows.length ? tbl(["Tarikh", "Kategori", "Nota", "Cara bayar", "Jumlah (RM)"], r.rows.map(x => `<tr class="${x.bill ? "muted" : ""}"><td>${fmtD(x.date)}</td><td>${esc(x.cat)}</td><td>${esc(x.note)}</td><td>${esc(x.via)}</td><td class="r ${x.type === "in" ? "pos" : x.bill ? "" : "neg"}">${x.type === "in" ? "+" : "−"}${R(x.amount)}</td></tr>`).join("")) + (r.rows.some(x => x.bill) ? `<p class="note">Baris kelabu = bayaran bil kad kredit; tidak dikira dalam Keluar kerana belanja kad sudah dikira.</p>` : "") : `<p class="muted">Tiada transaksi.</p>`}
+  ${r.cards.length ? `<h2>Kad kredit</h2>${tbl(["Kad", "Belanja bulan ini (RM)", "Dibayar bulan ini (RM)", "Baki semasa (RM)", "%"], r.cards.map(c => `<tr><td>${esc(c.name)}</td><td class="r">${R(c.spend)}</td><td class="r">${R(c.paid)}</td><td class="r ${c.balance > 0 ? "neg" : "pos"}">${R(c.balance)}</td><td class="r">${c.util.toFixed(0)}%</td></tr>`).join(""))}<p class="note">% = penggunaan had kredit.</p>` : ""}
+  ${r.commitments.length || r.debts.length ? `<h2>Komitmen & hutang (${R(r.committed)} sebulan)</h2>${tbl(["Perkara", "Hari bayar", "Status", "Jumlah (RM)"],
+      r.commitments.map(c => `<tr><td>${esc(c.name)}</td><td>${c.day || "—"}</td><td>${ok(c.paid)}</td><td class="r">${R(c.amount)}</td></tr>`).join("")
+    + r.debts.map(d => `<tr><td>${esc(d.name)} <small class="muted">· baki ${R(d.balance)} · ${d.rate}%</small></td><td>${d.day || "—"}</td><td>${d.balance > 0 ? ok(d.paid) : `<span class="ok">Selesai</span>`}</td><td class="r">${R(d.payment)}</td></tr>`).join(""))}` : ""}
+  <h2>Simpanan</h2>
+  ${tbl(["Perkara", "Ada", "Sasaran", "%"], [
+    ["Dana kecemasan · Stage 1 (ASB)", R(r.emergency.asb), R(r.emergency.asbTarget), r.emergency.asbTarget ? Math.min(100, r.emergency.asb / r.emergency.asbTarget * 100) : 0],
+    ["Dana kecemasan · Stage 2 (Tabung Haji)", R(r.emergency.th), R(r.emergency.thTarget), r.emergency.thTarget ? Math.min(100, r.emergency.th / r.emergency.thTarget * 100) : 0],
+    ["Emas", r.gold.have + " g", r.gold.target + " g", r.gold.target ? Math.min(100, r.gold.have / r.gold.target * 100) : 0]
+  ].map(x => `<tr><td>${x[0]}</td><td>${x[1]}</td><td>${x[2]}</td><td class="r">${x[3].toFixed(0)}%</td></tr>`).join(""))}
+  <footer>Dijana ${now} · Pelan 2030 · baki kad, hutang & simpanan ialah nilai semasa.</footer>
+  </div>`;
+}
+function exportPDF() {
+  const r = monthReport(S, reportMonth, today());
+  let el = document.getElementById("printArea");
+  if (!el) { el = document.createElement("div"); el.id = "printArea"; document.body.appendChild(el); }
+  el.innerHTML = reportHTML(r);
+  const oldTitle = document.title;
+  document.title = "Laporan-kewangan-" + reportMonth; // nama fail PDF lalai
+  const done = () => { document.title = oldTitle; window.removeEventListener("afterprint", done); };
+  window.addEventListener("afterprint", done);
+  setTimeout(() => { window.print(); setTimeout(done, 1500); }, 50);
+}
+
 function vKewangan() {
   const c = calc(S), t = today();
-  const rows = S.tx.filter(x => !txMonth || String(x.date).slice(0, 7) === txMonth).sort((a, b) => b.date.localeCompare(a.date));
-  const tin = sum(rows.filter(r => r.type === "in"), r => r.amount), tout = sum(rows.filter(r => r.type === "out"), r => r.amount);
+  const inSel = x => !txMonth || String(x.date).slice(0, 7) === txMonth;
+  const alloc = Object.assign({}, ...S.cards.map(c => cardAlloc(S, c.id)));
+  const cardRows = S.cardTx.filter(x => x.type === "belanja" && inSel(x)).map(x => ({ ...x, _card: true }));
+  const rows = [...S.tx.filter(inSel), ...cardRows].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const isBill = r => !r._card && r.type === "out" && r.cat === "Kad kredit";
+  const tin = sum(rows.filter(r => !r._card && r.type === "in"), r => r.amount);
+  const tout = sum(rows.filter(r => r._card || (r.type === "out" && !isBill(r))), r => r.amount);
   const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
   const { s1, s2, stage } = emergencyCalc(S, t);
   const stLine = (sv, label) => sv.need ? `Perlu ${RM(sv.need)} lagi · ${isFinite(sv.perMonth) ? RM(sv.perMonth) + " sebulan" : "tarikh sasaran sudah lepas"}` : label + " tercapai ✓";
   const pill = n => stage === n ? `<span class="pill warn">Sedang dibina</span>` : stage > n ? `<span class="pill ok">Selesai</span>` : `<span class="pill">Seterusnya</span>`;
   return `
+  <section class="card">
+    <h2>Laporan bulanan</h2>
+    <p class="small muted">Eksport ringkasan, kategori, transaksi, kad kredit, komitmen dan simpanan bagi sebulan. Dalam dialog cetak, pilih <b>Simpan sebagai PDF</b>.</p>
+    <div class="row">${monthSelect("reportmonth", reportMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace('<option value="" selected>Semua bulan</option>', "").replace('<option value="" >Semua bulan</option>', "")}<button class="primary" data-act="pdf">Eksport PDF</button></div>
+  </section>
+
   <section class="card">
     <h2>Sumber pendapatan</h2>
     ${S.incomes.length ? `<ul class="list">${S.incomes.map(i => `<li><div class="grow"><div>${esc(i.name)}</div><span class="pill">${i.type}</span></div><span class="num">${RM(i.amount)}</span>${del("incomes", i.id)}</li>`).join("")}</ul>` : `<p class="empty">Belum ada pendapatan.</p>`}
@@ -887,17 +1033,21 @@ function vKewangan() {
   </section>
 
   <section class="card">
-    <div class="row between"><h2>Transaksi</h2>${monthSelect("txmonth", txMonth, S.tx.map(t => t.date))}</div>
+    <div class="row between"><h2>Transaksi</h2>${monthSelect("txmonth", txMonth, [...S.tx, ...S.cardTx].map(t => t.date))}</div>
     ${txMonth ? "" : `<p class="small muted" style="margin:0 0 6px">Semua bulan · ${rows.length} transaksi</p>`}
     <div class="grid3">${stat("Masuk", RM(tin), "pos")}${stat("Keluar", RM(tout), "neg")}${stat("Bersih", RM(tin - tout), tin - tout >= 0 ? "pos" : "neg")}</div>
-    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !txMonth, r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}</div></div>
-      <span class="num ${r.type === "in" ? "pos" : "neg"}">${r.type === "in" ? "+" : "−"}${RM(r.amount)}</span>${del("tx", r.id)}</li>`)}</ul>` : `<p class="empty">${txMonth ? "Tiada transaksi untuk " + fmtYM(txMonth) : "Belum ada transaksi"}.</p>`}
+    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !txMonth, r => r._card
+      ? `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · 💳 ${esc(cardName(r.cardId))}</div><div style="margin-top:4px">${payPill(alloc[r.id])}</div></div>
+      <span class="num neg">−${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`
+      : `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}${isBill(r) ? " · bayar bil kad (tidak dikira dalam Keluar)" : ""}</div></div>
+      <span class="num ${r.type === "in" ? "pos" : isBill(r) ? "muted" : "neg"}">${r.type === "in" ? "+" : "−"}${RM(r.amount)}</span>${del("tx", r.id)}</li>`)}</ul>` : `<p class="empty">${txMonth ? "Tiada transaksi untuk " + fmtYM(txMonth) : "Belum ada transaksi"}.</p>`}
     <form class="add" data-form="tx">
       <label>Tarikh<input name="date" type="date" value="${ymd(t)}" required></label>
       <label>Jenis<select name="type"><option value="out">Keluar</option><option value="in">Masuk</option></select></label>
       <label>Kategori<input name="cat" required list="cats" placeholder="cth. Makan"></label>
       <label>Jumlah (RM)<input name="amount" type="number" inputmode="decimal" min="0" step="0.01" required></label>
       <label>Nota<input name="note"></label>
+      ${S.cards.length ? `<label>Bayar guna<select name="via"><option value="">Tunai / debit</option>${S.cards.map(c => `<option value="${c.id}">💳 ${esc(c.name)}</option>`).join("")}</select></label>` : ""}
       <button class="primary">Rekod</button>
     </form>
     <datalist id="cats">${["Gaji","Sampingan","Pasif","Makan","Pengangkutan","Sewa","Utiliti","Komitmen","Hutang","Simpanan","Emas","ASB","Tabung Haji","Kursus","Lain-lain"].map(x => `<option value="${x}">`).join("")}</datalist>
@@ -952,11 +1102,18 @@ function vKewangan() {
 
 const CARD_CATS = ["Makan", "Minyak", "Barang dapur", "Bil", "Belian dalam talian", "Pakaian", "Kesihatan", "Kursus", "Perjalanan", "Lain-lain"];
 let cardMonth = ym(today()), cardFilter = "";
+function cardDueLine(c, k) {
+  if (k.balance <= 0) return `<div style="margin-top:6px"><span class="pill ok">✓ Sudah bayar semua</span></div>`;
+  const nd = nextDue(c.dueDay, today());
+  const unpaid = Object.values(cardAlloc(S, c.id)).filter(a => a.status !== "dibayar").length;
+  return `<div class="row" style="margin-top:6px;gap:6px"><span class="pill ${nd && nd.diff <= 3 ? "bad" : "warn"}">Belum bayar ${RM(k.balance)}</span><span class="small muted">${unpaid} belanja${nd ? ` · tarikh akhir ${fmtD(nd.date)} (${nd.diff === 0 ? "hari ini" : nd.diff + " hari lagi"})` : ""}</span></div>`;
+}
 function vKad() {
   const t = today();
   const cards = S.cards.map(c => ({ c, k: cardCalc(S, c, t) }));
   const totBal = sum(cards, x => x.k.balance), totLim = sum(cards, x => x.k.limit);
   const totUtil = totLim > 0 ? totBal / totLim * 100 : 0;
+  const allocAll = Object.assign({}, ...S.cards.map(c => cardAlloc(S, c.id)));
   const rows = S.cardTx.filter(x => (!cardMonth || String(x.date).slice(0, 7) === cardMonth) && (!cardFilter || x.cardId === cardFilter)).sort((a, b) => b.date.localeCompare(a.date));
   const mSpend = sum(rows.filter(r => r.type === "belanja"), r => r.amount), mPaid = sum(rows.filter(r => r.type === "bayar"), r => r.amount);
   const cname = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
@@ -967,6 +1124,7 @@ function vKad() {
     ${cards.length ? `<div class="grid2">${stat("Baki semua kad", RM(totBal), totBal ? "neg" : "")}${stat("Had tersedia", RM(totLim - totBal))}</div>
     ${cards.map(({ c, k }) => `<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
       <div class="row between"><div><b>${esc(c.name)}</b> <span class="small muted">· bayar ${c.dueDay || "—"} hb${c.rate ? ` · ${c.rate}%` : ""}</span></div>${del("cards", c.id)}</div>
+      ${cardDueLine(c, k)}
       <div class="row between small" style="margin-top:4px"><span>Baki ${RM(k.balance)} / had ${RM(k.limit)}</span><span class="pill ${lvl(k.level)}">${k.util.toFixed(0)}%</span></div>
       ${bar(k.util, k.util > 70 ? "" : "amber")}
       <div class="grid3" style="margin-top:8px">${stat("Belanja bulan ini", RM(k.monthSpend))}${stat("Bayaran minimum ≈", RM(k.minPay))}${stat("Faedah sebulan jika tak bayar penuh ≈", RM(k.interest))}</div>
@@ -1001,7 +1159,7 @@ function vKad() {
       ${monthSelect("cardmonth", cardMonth, S.cardTx.map(t => t.date))}
     </div>
     <div class="grid2" style="margin-top:8px">${stat("Belanja " + (cardMonth ? fmtYM(cardMonth) : "semua bulan"), RM(mSpend), "neg")}${stat("Dibayar", RM(mPaid), "pos")}</div>
-    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !cardMonth, r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · ${esc(cname(r.cardId))}</div></div>
+    ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !cardMonth, r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · ${esc(cname(r.cardId))}</div>${r.type !== "bayar" ? `<div style="margin-top:4px">${payPill(allocAll[r.id])}</div>` : ""}</div>
       <span class="num ${r.type === "bayar" ? "pos" : r.type === "awal" ? "" : "neg"}">${r.type === "bayar" ? "−" : "+"}${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`)}</ul>` : `<p class="empty">${cardMonth ? "Tiada rekod untuk " + fmtYM(cardMonth) : "Belum ada rekod"}.</p>`}
   </section>` : ""}`;
 }
@@ -1239,6 +1397,14 @@ function vTetapan() {
   <p class="small muted" style="text-align:center">Pelan 2030 · skema v${S.v}</p>`;
 }
 
+function payPill(st) {
+  if (!st) return "";
+  if (st.status === "dibayar") return `<span class="pill ok">Sudah bayar</span>`;
+  if (st.status === "separa") return `<span class="pill warn">Separa · baki ${RM(st.owed)}</span>`;
+  return `<span class="pill bad">Belum bayar</span>`;
+}
+const cardName = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
+
 const VIEWS = { ringkasan: vRingkasan, kewangan: vKewangan, hutang: vHutang, pelan: vPelan, niaga: vNiaga, tetapan: vTetapan };
 
 function render() {
@@ -1289,7 +1455,13 @@ document.addEventListener("submit", e => {
   }
   switch (f.dataset.form) {
     case "income": S.incomes.push({ id: uid(), name: d.name.trim(), type: d.type, amount: num(d.amount) }); break;
-    case "tx": S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() }); if (txMonth) txMonth = d.date.slice(0, 7); break;
+    case "tx":
+      if (d.via && d.type === "out" && S.cards.some(c => c.id === d.via)) {
+        S.cardTx.push({ id: uid(), cardId: d.via, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() });
+        toast("Direkod pada kad " + cardName(d.via) + " — belum bayar");
+      } else S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() });
+      if (txMonth) txMonth = d.date.slice(0, 7);
+      break;
     case "gold": Object.assign(S.gold, { have: num(d.have), target: num(d.target), price: num(d.price), by: d.by || S.gold.by }); toast("Disimpan"); break;
     case "emergency":
       Object.assign(S.asb, { have: num(d.asbHave), s1: num(d.s1), s1by: d.s1by || S.asb.s1by });
@@ -1358,6 +1530,7 @@ document.addEventListener("click", e => {
       }
       break;
     }
+    case "pdf": exportPDF(); break;
     case "restore1": if (restoreItem(S, id)) { commit(); toast("Dipulihkan"); } break;
     case "emptytrash": if (confirm("Kosongkan tong sampah? Item di dalamnya tidak boleh dipulihkan lagi.")) { S.trash = {}; commit(); } break;
     case "scanlost": scanLost(); break;
@@ -1397,6 +1570,7 @@ document.addEventListener("change", e => {
   }
   const act = el.dataset.act; if (!act) return;
   if (act === "txmonth") { txMonth = el.value; render(); }
+  if (act === "reportmonth" && el.value) { reportMonth = el.value; }
   if (act === "sumyear") { sumYear = num(el.value); render(); }
   if (act === "trendsel") { trendSel = el.value; render(); }
   if (act === "cardmonth") { cardMonth = el.value; render(); }

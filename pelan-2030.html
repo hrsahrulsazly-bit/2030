@@ -8,6 +8,10 @@
 <meta name="theme-color" content="#7A1F2B">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pelan 2030">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -105,14 +109,16 @@ svg.chart text{fill:var(--muted);font-size:10px;font-family:"IBM Plex Sans",sans
 <script>
 // @logic-start — fungsi tulen (diuji dalam tests/calc.test.mjs)
 const DEFAULTS = () => ({
-  v: 2,
+  v: 4,
   updatedAt: 0,
-  settings: { name: "", targetPassive: 3000, emergencyMonths: 6 },
+  settings: { name: "", targetPassive: 3000, emergencyMonths: 6, notify: false, notifyDays: 3 },
   savings: 0,
   incomes: [], commitments: [], debts: [], tx: [], goals: [], ventures: [],
+  cards: [], cardTx: [],
   paid: {},
   gold: { have: 0, target: 30, price: 0, by: "2028-12" },
-  asb: { have: 0, s1: 15000, s2: 30000, s1by: "2027-12", s2by: "2030-12" }
+  asb: { have: 0, s1: 15000, s1by: "2027-12" },       // dana kecemasan stage 1
+  th:  { have: 0, target: 15000, by: "2030-12" }       // dana kecemasan stage 2 (Tabung Haji)
 });
 
 function normalize(d) {
@@ -122,7 +128,8 @@ function normalize(d) {
   o.settings = Object.assign({}, b.settings, d.settings || {});
   o.gold = Object.assign({}, b.gold, d.gold || {});
   o.asb = Object.assign({}, b.asb, d.asb || {});
-  for (const k of ["incomes", "commitments", "debts", "tx", "goals", "ventures"]) {
+  o.th = Object.assign({}, b.th, d.th || {});
+  for (const k of ["incomes", "commitments", "debts", "tx", "goals", "ventures", "cards", "cardTx"]) {
     if (!Array.isArray(o[k])) o[k] = [];
   }
   if (!o.paid || typeof o.paid !== "object") o.paid = {};
@@ -130,6 +137,10 @@ function normalize(d) {
   o.v = Math.max(1, Number(o.v) || 1);
   // v1 → v2: tambah cap masa `updatedAt` untuk penyegerakan awan.
   if (o.v < 2) { o.updatedAt = Number(o.updatedAt) || 0; o.v = 2; }
+  // v2 → v3: kad kredit (cards, cardTx) — tatasusunan kosong sudah diisi di atas.
+  if (o.v < 3) o.v = 3;
+  // v3 → v4: dana kecemasan = Stage 1 ASB + Stage 2 Tabung Haji. Medan lama asb.s2/s2by dikekalkan (tidak dipadam).
+  if (o.v < 4) { if (!d.th && d.asb && d.asb.s2by) o.th.by = d.asb.s2by; o.v = 4; }
   o.updatedAt = Number(o.updatedAt) || 0;
   return o;
 }
@@ -149,9 +160,14 @@ function calc(S) {
   const target = Number(S.settings.targetPassive) || 0;
   const passivePct = target > 0 ? Math.min(100, (mix.pasif / target) * 100) : 0;
   const totalDebt = sum(S.debts, x => x.balance);
-  const emergencyTarget = out * (Number(S.settings.emergencyMonths) || 0);
-  const emergencyPct = emergencyTarget > 0 ? Math.min(100, (S.savings / emergencyTarget) * 100) : 0;
-  return { income, commit, debtPay, out, balance, dsr, dsrLevel, mix, passivePct, totalDebt, emergencyTarget, emergencyPct };
+  const asbT = Number(S.asb.s1) || 0, thT = Number(S.th.target) || 0;
+  const asbH = Number(S.asb.have) || 0, thH = Number(S.th.have) || 0;
+  const emergencyTarget = asbT + thT;
+  const emergencyHave = asbH + thH;
+  // Setiap stage dihadkan pada sasarannya supaya lebihan ASB tidak menutup kekurangan Tabung Haji.
+  const emergencyPct = emergencyTarget > 0 ? Math.min(100, ((Math.min(asbH, asbT) + Math.min(thH, thT)) / emergencyTarget) * 100) : 0;
+  const emergencyMonths = out > 0 ? (emergencyHave + (Number(S.savings) || 0)) / out : Infinity;
+  return { income, commit, debtPay, out, balance, dsr, dsrLevel, mix, passivePct, totalDebt, emergencyTarget, emergencyHave, emergencyPct, emergencyMonths };
 }
 
 // Bilangan bulan untuk selesaikan hutang (faedah tahunan % dikompaun bulanan).
@@ -175,12 +191,32 @@ function addMonths(date, n) {
   return d;
 }
 
+// Ringkasan satu kad kredit: baki, penggunaan had, belanja bulan, kategori.
+function cardCalc(S, card, today) {
+  const rows = S.cardTx.filter(t => t.cardId === card.id);
+  const spend = sum(rows.filter(t => t.type === "belanja" || t.type === "awal"), t => t.amount);
+  const paidAmt = sum(rows.filter(t => t.type === "bayar"), t => t.amount);
+  const balance = Math.max(0, spend - paidAmt);
+  const limit = Number(card.limit) || 0;
+  const util = limit > 0 ? (balance / limit) * 100 : 0;
+  const k = ym(today);
+  const month = rows.filter(t => t.type === "belanja" && String(t.date).slice(0, 7) === k);
+  const monthSpend = sum(month, t => t.amount);
+  const byCat = {};
+  for (const t of month) byCat[t.cat || "Lain-lain"] = (byCat[t.cat || "Lain-lain"] || 0) + (Number(t.amount) || 0);
+  const minPay = balance > 0 ? Math.min(balance, Math.max(50, balance * 0.05)) : 0;
+  const interest = balance * (Number(card.rate) || 0) / 100 / 12;
+  const level = util < 30 ? "sihat" : util <= 70 ? "berhati-hati" : "tinggi";
+  return { balance, limit, util, monthSpend, byCat, minPay, interest, level, available: Math.max(0, limit - balance) };
+}
+
 // Peringatan bayaran: tertunggak bulan ini + akan datang dalam `days` hari.
 function upcoming(S, today, days = 14) {
   const t0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const items = [
     ...S.commitments.map(c => ({ id: c.id, name: c.name, amount: Number(c.amount) || 0, day: Number(c.day), kind: "komitmen" })),
-    ...S.debts.filter(d => (Number(d.balance) || 0) > 0).map(d => ({ id: d.id, name: d.name, amount: Number(d.payment) || 0, day: Number(d.day), kind: "hutang" }))
+    ...S.debts.filter(d => (Number(d.balance) || 0) > 0).map(d => ({ id: d.id, name: d.name, amount: Number(d.payment) || 0, day: Number(d.day), kind: "hutang" })),
+    ...(S.cards || []).map(c => ({ id: c.id, name: "Kad " + c.name, amount: cardCalc(S, c, today).balance, day: Number(c.dueDay), kind: "kad" })).filter(c => c.amount > 0)
   ].filter(i => i.day >= 1 && i.day <= 31);
   const res = [];
   for (const it of items) {
@@ -223,6 +259,46 @@ function trend(tx, today, n) {
   }
   return out;
 }
+// Dana kecemasan berperingkat: Stage 1 ASB → Stage 2 Tabung Haji.
+function emergencyCalc(S, today) {
+  const s1 = savCalc(S.asb.have, S.asb.s1, S.asb.s1by, today);
+  const s2 = savCalc(S.th.have, S.th.target, S.th.by, today);
+  const stage = s1.need > 0 ? 1 : s2.need > 0 ? 2 : 3; // 3 = kedua-dua selesai
+  return { s1, s2, stage };
+}
+
+// Item bayaran berulang (komitmen, hutang aktif, kad dengan baki) untuk kalendar.
+function billItems(S, today) {
+  return [
+    ...S.commitments.map(c => ({ id: c.id, name: c.name, amount: Number(c.amount) || 0, day: Number(c.day) })),
+    ...S.debts.filter(d => (Number(d.balance) || 0) > 0).map(d => ({ id: d.id, name: d.name, amount: Number(d.payment) || 0, day: Number(d.day) })),
+    ...S.cards.map(c => ({ id: c.id, name: "Kad " + c.name, amount: null, day: Number(c.dueDay) }))
+  ].filter(i => i.day >= 1 && i.day <= 31);
+}
+
+// Fail kalendar iCalendar (.ics): acara bulanan berulang hingga 31 Dis 2030 dengan peringatan.
+function buildICS(S, today, notifyDays = 3) {
+  const escT = t => String(t).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  const d8 = d => d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+  const stamp = today.toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const n = Math.max(0, Number(notifyDays) || 0);
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Pelan 2030//MS", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:Pelan 2030 — Bayaran"];
+  for (const it of billItems(S, today)) {
+    const last = it.day >= 29; // 29–31 → hari terakhir bulan (tidak terlepas bulan pendek)
+    let start = new Date(today.getFullYear(), today.getMonth(), Math.min(it.day, dim(today.getFullYear(), today.getMonth())));
+    if (last) start = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+    const title = "Bayar " + it.name + (it.amount ? " — RM" + Math.round(it.amount) : "");
+    lines.push("BEGIN:VEVENT", `UID:${it.id}@pelan2030`, `DTSTAMP:${stamp}`,
+      `DTSTART;VALUE=DATE:${d8(start)}`, `DTEND;VALUE=DATE:${d8(end)}`,
+      `RRULE:FREQ=MONTHLY;BYMONTHDAY=${last ? -1 : it.day};UNTIL=20301231`,
+      `SUMMARY:${escT(title)}`, `DESCRIPTION:${escT("Peringatan dari app Pelan 2030" + (last ? " (hari terakhir bulan)" : ""))}`, "TRANSP:TRANSPARENT");
+    if (n > 0) lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${escT(title)}`, `TRIGGER:-P${n - 1}DT15H`, "END:VALARM");
+    lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${escT(title)}`, "TRIGGER:PT9H", "END:VALARM", "END:VEVENT");
+  }
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n") + "\r\n";
+}
 // @logic-end
 </script>
 
@@ -254,11 +330,57 @@ function load() {
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { toast("Gagal simpan — storan pelayar penuh atau disekat"); }
 }
-function commit() { S.updatedAt = Date.now(); save(); queuePush(); render(); }
+function commit() { S.updatedAt = Date.now(); save(); queuePush(); render(); syncReminders(); }
+
+/* ---------- notifikasi tarikh bayar ---------- */
+const notifySupported = () => "Notification" in window && "serviceWorker" in navigator;
+// Simpan senarai bayaran akan datang dalam Cache supaya service worker boleh semak di latar belakang.
+async function syncReminders(check = true) {
+  if (!("caches" in window) || !("serviceWorker" in navigator)) return;
+  try {
+    const items = upcoming(S, today(), 45).map(u => ({ key: u.key, name: u.name, amount: u.amount, due: u.due }));
+    const c = await caches.open("pelan2030-data");
+    await c.put("/__peringatan.json", new Response(JSON.stringify({ on: !!S.settings.notify, days: Number(S.settings.notifyDays) || 0, items }), { headers: { "content-type": "application/json" } }));
+    if (check && S.settings.notify && Notification.permission === "granted") {
+      const reg = await navigator.serviceWorker.ready;
+      if (reg.active) reg.active.postMessage({ type: "semak" });
+    }
+  } catch {}
+}
+async function registerPeriodic() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (!reg.periodicSync) return "tiada";
+    const st = await navigator.permissions.query({ name: "periodic-background-sync" });
+    if (st.state !== "granted") return "tiada";
+    await reg.periodicSync.register("peringatan", { minInterval: 12 * 60 * 60 * 1000 });
+    return "aktif";
+  } catch { return "tiada"; }
+}
+async function enableNotify() {
+  if (!notifySupported()) { toast("Pelayar ini tidak menyokong notifikasi"); return; }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("Kebenaran ditolak — benarkan notifikasi dalam tetapan pelayar"); render(); return; }
+  S.settings.notify = true; commit();
+  const bg = await registerPeriodic();
+  toast(bg === "aktif" ? "Notifikasi dihidupkan, termasuk semakan latar belakang" : "Notifikasi dihidupkan");
+}
+async function testNotify() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    await reg.showNotification("Pelan 2030", { body: "Ujian berjaya — anda akan dimaklumkan sebelum tarikh bayar.", icon: "icons/icon-192.png", badge: "icons/icon-192.png", tag: "ujian" });
+  } catch { toast("Tidak dapat papar notifikasi"); }
+}
+function downloadICS() {
+  if (!billItems(S, today()).length) { toast("Tiada komitmen, hutang atau kad dengan tarikh bayar"); return; }
+  const blob = new Blob([buildICS(S, today(), S.settings.notifyDays)], { type: "text/calendar" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "pelan2030-tarikh-bayar.ics";
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
 
 /* ---------- penyegerakan awan (Supabase) ---------- */
 const CFG = window.PELAN_CONFIG || {};
-const cloudConfigured = !!(CFG.supabaseUrl && CFG.supabaseKey);
+let cloudConfigured = !!(CFG.supabaseUrl && CFG.supabaseKey);
 let sb = null, sbUser = null, syncMsg = "", pushT = null;
 function setSync(msg) {
   syncMsg = msg;
@@ -291,8 +413,20 @@ async function pullCloud() {
     setSync("Sudah terkini " + new Date().toLocaleTimeString("ms-MY"));
   }
 }
-function initCloud() {
-  if (!cloudConfigured || !window.supabase) return;
+// Tetapan Supabase: config.js dahulu; jika kosong, ambil dari Vercel (pemboleh ubah persekitaran
+// yang diisi oleh integrasi Supabase ↔ Vercel) melalui /api/supabase-config.
+async function loadCloudConfig() {
+  if (cloudConfigured || !location.protocol.startsWith("http")) return;
+  try {
+    const r = await fetch("/api/supabase-config", { cache: "no-store" });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.supabaseUrl && j.supabaseKey) { CFG.supabaseUrl = j.supabaseUrl; CFG.supabaseKey = j.supabaseKey; cloudConfigured = true; }
+  } catch {}
+}
+async function initCloud() {
+  await loadCloudConfig();
+  if (!cloudConfigured || !window.supabase) { if (tab === "tetapan") render(); return; }
   sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey);
   sb.auth.onAuthStateChange((_ev, session) => {
     const u = session ? session.user : null;
@@ -316,7 +450,7 @@ const I = {
   niaga: '<path d="M4 20V10l8-6 8 6v10M9 20v-6h6v6"/>',
   tetapan: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>'
 };
-const TABS = [["ringkasan","Ringkasan"],["kewangan","Kewangan"],["hutang","Hutang"],["pelan","Pelan 2030"],["niaga","Niaga"],["tetapan","Tetapan"]];
+const TABS = [["ringkasan","Ringkasan"],["kewangan","Kewangan"],["hutang","Hutang/Kad"],["pelan","Pelan 2030"],["niaga","Niaga"],["tetapan","Tetapan"]];
 const icon = k => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[k]}</svg>`;
 
 /* ---------- komponen ---------- */
@@ -345,7 +479,10 @@ function nextSteps(c) {
   if (!S.incomes.length) s.push("Tambah sumber pendapatan di tab Kewangan.");
   if (!S.commitments.length && !S.debts.length) s.push("Senaraikan komitmen dan hutang anda.");
   if (c.dsr >= 40 && isFinite(c.dsr)) s.push("DSR melebihi 40% — fokus bayar hutang faedah tertinggi dahulu.");
-  if (c.emergencyPct < 100 && c.out > 0) s.push(`Bina dana kecemasan: ${RM(c.emergencyTarget - S.savings)} lagi.`);
+  { const e = emergencyCalc(S, today());
+    if (e.stage === 1) s.push(`Dana kecemasan stage 1: tambah ${RM(e.s1.need)} lagi dalam ASB${isFinite(e.s1.perMonth) ? ` (${RM(e.s1.perMonth)} sebulan)` : ""}.`);
+    else if (e.stage === 2) s.push(`Dana kecemasan stage 2: tambah ${RM(e.s2.need)} lagi dalam Tabung Haji${isFinite(e.s2.perMonth) ? ` (${RM(e.s2.perMonth)} sebulan)` : ""}.`); }
+  for (const cd of S.cards) { const k = cardCalc(S, cd, today()); if (k.util >= 30) s.push(`Kad ${cd.name} guna ${k.util.toFixed(0)}% had — cuba kurangkan bawah 30%.`); }
   if (!S.goals.length) s.push("Isi matlamat tahunan di tab Pelan 2030 (guna templat).");
   const g = S.goals.filter(x => !x.done).sort((a, b) => a.year - b.year)[0];
   if (g) s.push(`Matlamat ${g.year}: ${g.title}`);
@@ -364,7 +501,7 @@ function vRingkasan() {
   const up = upcoming(S, t);
   const mixT = c.income || 1;
   const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
-  const as = savCalc(S.asb.have, S.asb.have >= S.asb.s1 ? S.asb.s2 : S.asb.s1, S.asb.have >= S.asb.s1 ? S.asb.s2by : S.asb.s1by, t);
+  const em = emergencyCalc(S, t);
   return `
   <section class="card hero">
     <p class="muted small" style="margin:0">Selamat datang${S.settings.name ? ", " + esc(S.settings.name) : ""}</p>
@@ -404,13 +541,13 @@ function vRingkasan() {
   </section>
 
   <section class="card">
-    <h2>Emas & ASB</h2>
+    <h2>Emas & dana kecemasan</h2>
     <div class="row between small"><span>Emas ${S.gold.have} / ${S.gold.target} g</span><span>${gs.pct.toFixed(0)}%</span></div>
     ${bar(gs.pct, "gold")}
     <p class="small muted">${gs.need ? `${(gs.perMonth).toFixed(2)} g sebulan hingga ${fmtYM(S.gold.by)}` : "Sasaran tercapai 🎉"}</p>
-    <div class="row between small"><span>ASB ${RM(S.asb.have)} / ${RM(S.asb.have >= S.asb.s1 ? S.asb.s2 : S.asb.s1)} (stage ${S.asb.have >= S.asb.s1 ? 2 : 1})</span><span>${as.pct.toFixed(0)}%</span></div>
-    ${bar(as.pct, "amber")}
-    <p class="small muted">${as.need ? `${RM(as.perMonth)} sebulan` : "Sasaran tercapai 🎉"}</p>
+    <div class="row between small" style="margin-top:6px"><span>Dana kecemasan ${RM(c.emergencyHave)} / ${RM(c.emergencyTarget)}</span><span>${c.emergencyPct.toFixed(0)}%</span></div>
+    ${bar(c.emergencyPct)}
+    <p class="small muted">${em.stage === 3 ? "Kedua-dua stage tercapai 🎉" : em.stage === 1 ? `Stage 1 (ASB): ${RM(S.asb.have)} / ${RM(S.asb.s1)}` : `Stage 1 (ASB) ✓ · Stage 2 (Tabung Haji): ${RM(S.th.have)} / ${RM(S.th.target)}`}</p>
   </section>
 
   <section class="card">
@@ -424,7 +561,9 @@ function vKewangan() {
   const rows = S.tx.filter(x => String(x.date).slice(0, 7) === txMonth).sort((a, b) => b.date.localeCompare(a.date));
   const tin = sum(rows.filter(r => r.type === "in"), r => r.amount), tout = sum(rows.filter(r => r.type === "out"), r => r.amount);
   const gs = savCalc(S.gold.have, S.gold.target, S.gold.by, t);
-  const s1 = savCalc(S.asb.have, S.asb.s1, S.asb.s1by, t), s2 = savCalc(S.asb.have, S.asb.s2, S.asb.s2by, t);
+  const { s1, s2, stage } = emergencyCalc(S, t);
+  const stLine = (sv, label) => sv.need ? `Perlu ${RM(sv.need)} lagi · ${isFinite(sv.perMonth) ? RM(sv.perMonth) + " sebulan" : "tarikh sasaran sudah lepas"}` : label + " tercapai ✓";
+  const pill = n => stage === n ? `<span class="pill warn">Sedang dibina</span>` : stage > n ? `<span class="pill ok">Selesai</span>` : `<span class="pill">Seterusnya</span>`;
   return `
   <section class="card">
     <h2>Sumber pendapatan</h2>
@@ -450,7 +589,7 @@ function vKewangan() {
       <label>Nota<input name="note"></label>
       <button class="primary">Rekod</button>
     </form>
-    <datalist id="cats">${["Gaji","Sampingan","Pasif","Makan","Pengangkutan","Sewa","Utiliti","Komitmen","Hutang","Simpanan","Emas","ASB","Kursus","Lain-lain"].map(x => `<option value="${x}">`).join("")}</datalist>
+    <datalist id="cats">${["Gaji","Sampingan","Pasif","Makan","Pengangkutan","Sewa","Utiliti","Komitmen","Hutang","Simpanan","Emas","ASB","Tabung Haji","Kursus","Lain-lain"].map(x => `<option value="${x}">`).join("")}</datalist>
   </section>
 
   <section class="card">
@@ -468,38 +607,98 @@ function vKewangan() {
   </section>
 
   <section class="card">
-    <h2>ASB</h2>
-    <div class="row between small"><span>Stage 1: ${RM(S.asb.s1)} menjelang ${fmtYM(S.asb.s1by)}</span><span>${s1.pct.toFixed(0)}%</span></div>
-    ${bar(s1.pct, "amber")}
-    <p class="small muted">${s1.need ? `${RM(s1.perMonth)} sebulan` : "Stage 1 tercapai ✓"}</p>
-    <div class="row between small"><span>Stage 2: ${RM(S.asb.s2)} menjelang ${fmtYM(S.asb.s2by)}</span><span>${s2.pct.toFixed(0)}%</span></div>
-    ${bar(s2.pct, "amber")}
-    <p class="small muted">${s2.need ? `${RM(s2.perMonth)} sebulan` : "Stage 2 tercapai ✓"}</p>
-    <form class="add" data-form="asb">
-      <label>Baki ASB (RM)<input name="have" type="number" step="0.01" min="0" value="${S.asb.have}"></label>
-      <label>Stage 1 (RM)<input name="s1" type="number" min="0" value="${S.asb.s1}"></label>
+    <h2>Dana kecemasan</h2>
+    <div class="row between small"><span>${RM(c.emergencyHave)} / ${RM(c.emergencyTarget)}</span><span>${c.emergencyPct.toFixed(0)}%</span></div>
+    ${bar(c.emergencyPct)}
+    <p class="small muted">${c.out > 0 ? `Bersamaan ≈ ${c.emergencyMonths.toFixed(1)} bulan komitmen + hutang (${RM(c.out)} sebulan)${S.savings ? `, termasuk simpanan lain ${RM(S.savings)}` : ""}.` : "Tambah komitmen dan hutang untuk lihat berapa bulan dana ini boleh bertahan."}</p>
+
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      <div class="row between"><h3 style="margin:0">Stage 1 (ASB) · ${RM(S.asb.s1)}</h3>${pill(1)}</div>
+      <div class="row between small" style="margin-top:6px"><span>${RM(S.asb.have)} / ${RM(S.asb.s1)} menjelang ${fmtYM(S.asb.s1by)}</span><span>${s1.pct.toFixed(0)}%</span></div>
+      ${bar(s1.pct, "amber")}
+      <p class="small muted">${stLine(s1, "Stage 1")}</p>
+    </div>
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      <div class="row between"><h3 style="margin:0">Stage 2 (Tabung Haji) · ${RM(S.th.target)}</h3>${pill(2)}</div>
+      <div class="row between small" style="margin-top:6px"><span>${RM(S.th.have)} / ${RM(S.th.target)} menjelang ${fmtYM(S.th.by)}</span><span>${s2.pct.toFixed(0)}%</span></div>
+      ${bar(s2.pct, "gold")}
+      <p class="small muted">${stLine(s2, "Stage 2")}</p>
+    </div>
+
+    <details style="margin-top:12px"><summary>Kemas kini baki & sasaran</summary>
+    <form class="add" data-form="emergency">
+      <label>Baki ASB (RM)<input name="asbHave" type="number" step="0.01" min="0" value="${S.asb.have}"></label>
+      <label>Sasaran stage 1 (RM)<input name="s1" type="number" min="0" value="${S.asb.s1}"></label>
       <label>Stage 1 menjelang<input name="s1by" type="month" value="${S.asb.s1by}"></label>
-      <label>Stage 2 (RM)<input name="s2" type="number" min="0" value="${S.asb.s2}"></label>
-      <label>Stage 2 menjelang<input name="s2by" type="month" value="${S.asb.s2by}"></label>
-      <button>Simpan</button>
-    </form>
+      <label>Baki Tabung Haji (RM)<input name="thHave" type="number" step="0.01" min="0" value="${S.th.have}"></label>
+      <label>Sasaran stage 2 (RM)<input name="thTarget" type="number" min="0" value="${S.th.target}"></label>
+      <label>Stage 2 menjelang<input name="thBy" type="month" value="${S.th.by}"></label>
+      <label>Simpanan tunai lain (RM)<input name="savings" type="number" step="0.01" min="0" value="${S.savings}"></label>
+      <button class="primary">Simpan</button>
+    </form></details>
+  </section>`;
+}
+
+const CARD_CATS = ["Makan", "Minyak", "Barang dapur", "Bil", "Belian dalam talian", "Pakaian", "Kesihatan", "Kursus", "Perjalanan", "Lain-lain"];
+let cardMonth = ym(today()), cardFilter = "";
+function vKad() {
+  const t = today();
+  const cards = S.cards.map(c => ({ c, k: cardCalc(S, c, t) }));
+  const totBal = sum(cards, x => x.k.balance), totLim = sum(cards, x => x.k.limit);
+  const totUtil = totLim > 0 ? totBal / totLim * 100 : 0;
+  const rows = S.cardTx.filter(x => String(x.date).slice(0, 7) === cardMonth && (!cardFilter || x.cardId === cardFilter)).sort((a, b) => b.date.localeCompare(a.date));
+  const mSpend = sum(rows.filter(r => r.type === "belanja"), r => r.amount), mPaid = sum(rows.filter(r => r.type === "bayar"), r => r.amount);
+  const cname = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
+  const lvl = l => l === "sihat" ? "ok" : l === "tinggi" ? "bad" : "warn";
+  return `
+  <section class="card">
+    <div class="row between"><h2>Kad kredit</h2>${cards.length ? `<span class="pill ${lvl(totUtil < 30 ? "sihat" : totUtil <= 70 ? "x" : "tinggi")}">Guna ${totUtil.toFixed(0)}% had</span>` : ""}</div>
+    ${cards.length ? `<div class="grid2">${stat("Baki semua kad", RM(totBal), totBal ? "neg" : "")}${stat("Had tersedia", RM(totLim - totBal))}</div>
+    ${cards.map(({ c, k }) => `<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      <div class="row between"><div><b>${esc(c.name)}</b> <span class="small muted">· bayar ${c.dueDay || "—"} hb${c.rate ? ` · ${c.rate}%` : ""}</span></div>${del("cards", c.id)}</div>
+      <div class="row between small" style="margin-top:4px"><span>Baki ${RM(k.balance)} / had ${RM(k.limit)}</span><span class="pill ${lvl(k.level)}">${k.util.toFixed(0)}%</span></div>
+      ${bar(k.util, k.util > 70 ? "" : "amber")}
+      <div class="grid3" style="margin-top:8px">${stat("Belanja bulan ini", RM(k.monthSpend))}${stat("Bayaran minimum ≈", RM(k.minPay))}${stat("Faedah sebulan jika tak bayar penuh ≈", RM(k.interest))}</div>
+      ${Object.keys(k.byCat).length ? `<p class="small muted" style="margin:.5rem 0 0">${Object.entries(k.byCat).sort((a, b) => b[1] - a[1]).map(([n, v]) => `${esc(n)} ${RM(v)}`).join(" · ")}</p>` : ""}
+      ${k.balance > 0 ? `<form class="add" data-form="cardpay" data-id="${c.id}" style="grid-template-columns:1fr auto"><input name="amount" type="number" min="0" step="0.01" value="${k.balance.toFixed(2)}" aria-label="Jumlah bayaran"><button>Rekod bayaran kad</button></form>` : ""}
+    </div>`).join("")}
+    ${totUtil >= 30 ? `<p class="small muted">Tip: kekalkan penggunaan bawah 30% had dan bayar penuh setiap bulan untuk elak caj faedah.</p>` : ""}` : `<p class="empty">Belum ada kad. Tambah kad di bawah.</p>`}
+    <details style="margin-top:12px"><summary>Tambah kad</summary>
+    <form class="add" data-form="card">
+      <label>Nama kad<input name="name" required placeholder="cth. Maybank Visa"></label>
+      <label>Had kredit (RM)<input name="limit" type="number" min="0" step="0.01" required></label>
+      <label>Hari tarikh akhir bayar<input name="dueDay" type="number" min="1" max="31"></label>
+      <label>Faedah setahun (%)<input name="rate" type="number" min="0" step="0.01" value="15"></label>
+      <label>Baki semasa (RM)<input name="opening" type="number" min="0" step="0.01" value="0"></label>
+      <button class="primary">Tambah kad</button>
+    </form></details>
   </section>
 
-  <section class="card">
-    <h2>Dana kecemasan</h2>
-    <div class="row between small"><span>${RM(S.savings)} / ${RM(c.emergencyTarget)} (${S.settings.emergencyMonths} bulan perbelanjaan wajib)</span><span>${c.emergencyPct.toFixed(0)}%</span></div>
-    ${bar(c.emergencyPct)}
-    <form class="add" data-form="savings">
-      <label>Simpanan semasa (RM)<input name="savings" type="number" step="0.01" min="0" value="${S.savings}"></label>
-      <button>Simpan</button>
+  ${S.cards.length ? `<section class="card">
+    <h2>Rekod penggunaan kad</h2>
+    <form class="add" data-form="cardtx">
+      <label>Kad<select name="cardId">${S.cards.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></label>
+      <label>Tarikh<input name="date" type="date" value="${ymd(t)}" required></label>
+      <label>Jumlah (RM)<input name="amount" type="number" inputmode="decimal" min="0" step="0.01" required></label>
+      <label>Kategori<input name="cat" list="cardcats" required placeholder="cth. Minyak"></label>
+      <label>Kedai / nota<input name="note"></label>
+      <button class="primary">Rekod belanja</button>
     </form>
-  </section>`;
+    <datalist id="cardcats">${CARD_CATS.map(x => `<option value="${x}">`).join("")}</datalist>
+    <div class="row between" style="margin-top:14px">
+      <select data-act="cardfilter" aria-label="Tapis kad" style="width:auto"><option value="">Semua kad</option>${S.cards.map(c => `<option value="${c.id}" ${c.id === cardFilter ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+      <input type="month" value="${cardMonth}" data-act="cardmonth" aria-label="Bulan" style="width:auto">
+    </div>
+    <div class="grid2" style="margin-top:8px">${stat("Belanja " + fmtYM(cardMonth), RM(mSpend), "neg")}${stat("Dibayar", RM(mPaid), "pos")}</div>
+    ${rows.length ? `<ul class="list" style="margin-top:8px">${rows.map(r => `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · ${esc(cname(r.cardId))}</div></div>
+      <span class="num ${r.type === "bayar" ? "pos" : r.type === "awal" ? "" : "neg"}">${r.type === "bayar" ? "−" : "+"}${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`).join("")}</ul>` : `<p class="empty">Tiada rekod untuk ${fmtYM(cardMonth)}.</p>`}
+  </section>` : ""}`;
 }
 
 function vHutang() {
   const c = calc(S), t = today();
   const debts = [...S.debts].sort((a, b) => (Number(b.rate) || 0) - (Number(a.rate) || 0));
-  return `
+  return vKad() + `
   <section class="card">
     <div class="row between"><h2>Komitmen bulanan</h2>${dsrPill(c)}</div>
     ${S.commitments.length ? `<ul class="list">${S.commitments.map(x => `<li><div class="grow"><div>${esc(x.name)}</div><div class="small muted">Bayar setiap ${x.day || "—"} haribulan</div></div><span class="num">${RM(x.amount)}</span>${del("commitments", x.id)}</li>`).join("")}</ul>` : `<p class="empty">Tiada komitmen.</p>`}
@@ -605,9 +804,42 @@ function vNiaga() {
   </section>`;
 }
 
+let installEvt = null;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; if (tab === "tetapan") render(); });
+window.addEventListener("appinstalled", () => { installEvt = null; toast("App dipasang"); render(); });
+function vNotify() {
+  const perm = notifySupported() ? Notification.permission : "tiada";
+  const on = S.settings.notify && perm === "granted";
+  const n = Number(S.settings.notifyDays) || 0;
+  let status;
+  if (perm === "tiada") status = `<p class="small muted">Pelayar ini tidak menyokong notifikasi. Guna kalendar di bawah. Di iPhone, pasang app ke Skrin Utama dahulu (iOS 16.4+).</p>`;
+  else if (perm === "denied") status = `<p class="small neg">Notifikasi disekat. Buka tetapan pelayar/app → Notifikasi → benarkan untuk laman ini.</p>`;
+  else if (on) status = `<p class="small"><span class="pill ok">Hidup</span> Anda dimaklumkan ${n ? n + " hari sebelum" : "pada hari"} tarikh bayar, dan setiap hari jika lewat.</p>
+    <div class="row"><button class="sm" data-act="testnotify">Uji notifikasi</button><button class="sm" data-act="notifyoff">Matikan</button></div>`;
+  else status = `<button class="primary" data-act="notifyon">Hidupkan notifikasi</button>`;
+  return `<section class="card">
+    <h2>Notifikasi tarikh bayar</h2>
+    <label style="max-width:240px">Ingatkan saya<select data-act="notifydays">${[0, 1, 2, 3, 5, 7].map(d => `<option value="${d}" ${d === n ? "selected" : ""}>${d ? d + " hari sebelum" : "Pada hari bayar"}</option>`).join("")}</select></label>
+    <div style="margin-top:10px">${status}</div>
+    <p class="small muted">Notifikasi app disemak setiap kali app dibuka, dan secara berkala di latar belakang jika app dipasang (Chrome Android). Buka app sekurang-kurangnya sebulan sekali.</p>
+    <h3 style="margin-top:14px">Peringatan kalendar (paling pasti)</h3>
+    <p class="small muted">Muat turun dan buka fail ini — setiap komitmen, hutang dan kad ditambah ke kalendar telefon sebagai acara bulanan hingga 2030, dengan peringatan pukul 9 pagi. Muat turun semula jika anda menambah bayaran baru (acara sedia ada dikemas kini, tidak berganda).</p>
+    <button data-act="ics">Tambah ke kalendar (.ics)</button>
+  </section>`;
+}
+
+function vInstall() {
+  if (isStandalone()) return "";
+  const body = installEvt
+    ? `<p class="small muted">Pasang Pelan 2030 sebagai app di skrin utama — buka penuh skrin, tanpa bar pelayar.</p><button class="primary" data-act="install">Pasang app</button>`
+    : `<p class="small muted">Di Chrome Android: menu ⋮ → <b>Pasang app</b> (bukan "Tambah ke skrin utama"). Di iPhone (Safari): butang Kongsi → <b>Tambah ke Skrin Utama</b>.</p>`;
+  return `<section class="card"><h2>Pasang di telefon</h2>${body}</section>`;
+}
+
 function vCloud() {
   let body;
-  if (!cloudConfigured) body = `<p class="small muted">Belum disediakan. Isi URL dan kunci Supabase dalam fail <code>config.js</code>.</p>`;
+  if (!cloudConfigured) body = `<p class="small muted">Belum disambung. Sambungkan Supabase ke Vercel (Vercel → Integrations → Supabase), atau isi URL dan kunci dalam fail <code>config.js</code>.</p>`;
   else if (!sb) body = `<p class="small muted">Pustaka Supabase tidak dapat dimuatkan (mungkin luar talian). Data tetap disimpan dalam peranti ini.</p>`;
   else if (!sbUser) body = `<p class="small muted">Log masuk untuk simpan data di awan dan guna pada telefon serta komputer.</p>
     <form class="add" data-form="login"><label>E-mel<input name="email" type="email" required autocomplete="email"></label><button class="primary">Hantar pautan log masuk</button></form>`;
@@ -624,10 +856,11 @@ function vTetapan() {
     <form class="add" data-form="settings">
       <label>Nama<input name="name" value="${esc(S.settings.name)}"></label>
       <label>Sasaran pasif (RM/bln)<input name="targetPassive" type="number" min="0" value="${S.settings.targetPassive}"></label>
-      <label>Dana kecemasan (bulan)<input name="emergencyMonths" type="number" min="0" max="24" value="${S.settings.emergencyMonths}"></label>
       <button class="primary">Simpan</button>
     </form>
   </section>
+  ${vNotify()}
+  ${vInstall()}
   ${vCloud()}
   <section class="card">
     <h2>Sandaran</h2>
@@ -666,14 +899,32 @@ document.addEventListener("submit", e => {
     case "income": S.incomes.push({ id: uid(), name: d.name.trim(), type: d.type, amount: num(d.amount) }); break;
     case "tx": S.tx.push({ id: uid(), date: d.date, type: d.type, cat: d.cat.trim(), amount: num(d.amount), note: d.note.trim() }); txMonth = d.date.slice(0, 7); break;
     case "gold": Object.assign(S.gold, { have: num(d.have), target: num(d.target), price: num(d.price), by: d.by || S.gold.by }); toast("Disimpan"); break;
-    case "asb": Object.assign(S.asb, { have: num(d.have), s1: num(d.s1), s2: num(d.s2), s1by: d.s1by || S.asb.s1by, s2by: d.s2by || S.asb.s2by }); toast("Disimpan"); break;
-    case "savings": S.savings = num(d.savings); toast("Disimpan"); break;
+    case "emergency":
+      Object.assign(S.asb, { have: num(d.asbHave), s1: num(d.s1), s1by: d.s1by || S.asb.s1by });
+      Object.assign(S.th, { have: num(d.thHave), target: num(d.thTarget), by: d.thBy || S.th.by });
+      S.savings = num(d.savings); toast("Disimpan"); break;
     case "commitment": S.commitments.push({ id: uid(), name: d.name.trim(), amount: num(d.amount), day: num(d.day) }); break;
     case "debt": S.debts.push({ id: uid(), name: d.name.trim(), balance: num(d.balance), rate: num(d.rate), payment: num(d.payment), day: num(d.day) }); break;
     case "goal": S.goals.push({ id: uid(), year: num(d.year), area: d.area, title: d.title.trim(), done: false }); break;
     case "venture": S.ventures.push({ id: uid(), name: d.name.trim(), kind: d.kind.trim() || "Projek", target: num(d.target), stage: 0, steps: VENTURE_STEPS.map(t => ({ t, done: false })) }); break;
     case "step": { const v = S.ventures.find(x => x.id === f.dataset.id); if (v) v.steps.push({ t: d.t.trim(), done: false }); break; }
-    case "settings": Object.assign(S.settings, { name: d.name.trim(), targetPassive: num(d.targetPassive), emergencyMonths: num(d.emergencyMonths) }); toast("Disimpan"); break;
+    case "card": {
+      const card = { id: uid(), name: d.name.trim(), limit: num(d.limit), dueDay: num(d.dueDay), rate: num(d.rate) };
+      S.cards.push(card);
+      if (num(d.opening) > 0) S.cardTx.push({ id: uid(), cardId: card.id, date: ymd(today()), type: "awal", amount: num(d.opening), cat: "Baki awal", note: "" });
+      break;
+    }
+    case "cardtx": S.cardTx.push({ id: uid(), cardId: d.cardId, date: d.date, type: "belanja", amount: num(d.amount), cat: d.cat.trim(), note: d.note.trim() }); cardMonth = d.date.slice(0, 7); toast("Belanja kad direkod"); break;
+    case "cardpay": {
+      const card = S.cards.find(x => x.id === f.dataset.id); const amt = num(d.amount);
+      if (card && amt > 0) {
+        S.cardTx.push({ id: uid(), cardId: card.id, date: ymd(today()), type: "bayar", amount: amt, cat: "Bayaran", note: "" });
+        S.tx.push({ id: uid(), date: ymd(today()), type: "out", cat: "Kad kredit", amount: amt, note: "Bayar " + card.name });
+        toast("Bayaran kad direkod");
+      }
+      break;
+    }
+    case "settings": Object.assign(S.settings, { name: d.name.trim(), targetPassive: num(d.targetPassive), }); toast("Disimpan"); break;
   }
   commit();
 });
@@ -684,11 +935,17 @@ document.addEventListener("click", e => {
   const b = e.target.closest("button[data-act]"); if (!b) return;
   const { act, id } = b.dataset;
   switch (act) {
-    case "del": if (confirm("Padam item ini?")) { S[b.dataset.list] = S[b.dataset.list].filter(x => x.id !== id); commit(); } break;
+    case "del": if (confirm(b.dataset.list === "cards" ? "Padam kad ini dan semua rekod penggunaannya?" : "Padam item ini?")) {
+      S[b.dataset.list] = S[b.dataset.list].filter(x => x.id !== id);
+      if (b.dataset.list === "cards") S.cardTx = S.cardTx.filter(x => x.cardId !== id);
+      commit();
+    } break;
     case "pay": {
       S.paid[b.dataset.key] = true;
       const amt = num(b.dataset.amt);
-      S.tx.push({ id: uid(), date: ymd(today()), type: "out", cat: b.dataset.kind === "hutang" ? "Hutang" : "Komitmen", amount: amt, note: b.dataset.name, link: b.dataset.key });
+      const kind = b.dataset.kind;
+      S.tx.push({ id: uid(), date: ymd(today()), type: "out", cat: kind === "hutang" ? "Hutang" : kind === "kad" ? "Kad kredit" : "Komitmen", amount: amt, note: b.dataset.name, link: b.dataset.key });
+      if (kind === "kad") S.cardTx.push({ id: uid(), cardId: id, date: ymd(today()), type: "bayar", amount: amt, cat: "Bayaran", note: "" });
       if (b.dataset.kind === "hutang") { const d = S.debts.find(x => x.id === id); if (d) d.balance = Math.max(0, num(d.balance) - amt); }
       toast("Direkod sebagai transaksi"); commit(); break;
     }
@@ -708,6 +965,11 @@ document.addEventListener("click", e => {
     }
     case "restore": document.getElementById("restoreFile").click(); break;
     case "sync": pullCloud(); break;
+    case "notifyon": enableNotify(); break;
+    case "notifyoff": S.settings.notify = false; commit(); toast("Notifikasi dimatikan"); break;
+    case "testnotify": testNotify(); break;
+    case "ics": downloadICS(); break;
+    case "install": if (installEvt) { installEvt.prompt(); installEvt.userChoice.finally(() => { installEvt = null; render(); }); } break;
     case "logout": sb.auth.signOut().then(() => { sbUser = null; setSync(""); render(); toast("Telah log keluar. Data kekal dalam peranti ini."); }); break;
     case "wipe": if (confirm(sbUser ? "Padam SEMUA data, termasuk salinan di awan? Tindakan ini tidak boleh diundur." : "Padam SEMUA data? Tindakan ini tidak boleh diundur.") && confirm("Pasti? Muat turun sandaran dahulu jika perlu.")) { S = normalize(null); commit(); toast("Semua data dipadam"); } break;
   }
@@ -725,6 +987,9 @@ document.addEventListener("change", e => {
   }
   const act = el.dataset.act; if (!act) return;
   if (act === "txmonth" && el.value) { txMonth = el.value; render(); }
+  if (act === "cardmonth" && el.value) { cardMonth = el.value; render(); }
+  if (act === "notifydays") { S.settings.notifyDays = num(el.value); commit(); }
+  if (act === "cardfilter") { cardFilter = el.value; render(); }
   if (act === "goaldone") { const g = S.goals.find(x => x.id === el.dataset.id); if (g) { g.done = el.checked; commit(); } }
   if (act === "step") { const v = S.ventures.find(x => x.id === el.dataset.id); if (v) { v.steps[num(el.dataset.i)].done = el.checked; commit(); } }
   if (act === "debtbal") { const d = S.debts.find(x => x.id === el.dataset.id); if (d) { d.balance = num(el.value); commit(); } }
@@ -733,6 +998,8 @@ document.addEventListener("change", e => {
 window.addEventListener("storage", e => { if (e.key === KEY) { S = load(); render(); } });
 render();
 initCloud();
+syncReminders();
+if (S.settings.notify) registerPeriodic();
 
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
   navigator.serviceWorker.register("sw.js").catch(() => {});

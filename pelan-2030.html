@@ -6,6 +6,7 @@
 <title>Pelan 2030</title>
 <meta name="description" content="Perancangan kewangan dan kerjaya peribadi hingga 31 Disember 2030.">
 <meta name="theme-color" content="#0B6B57">
+<script>try{var _t=localStorage.getItem("pelan2030:theme");if(_t==="light"||_t==="dark")document.documentElement.dataset.theme=_t;if(localStorage.getItem("pelan2030:lang")==="en")document.documentElement.lang="en";}catch(e){}</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -113,6 +114,7 @@ svg.chart text{fill:var(--muted);font-size:11px;font-family:inherit}
 .toast{position:fixed;left:16px;right:16px;max-width:448px;margin:0 auto;bottom:calc(80px + env(safe-area-inset-bottom));background:var(--ink);color:var(--bg);min-height:52px;display:flex;align-items:center;padding:0 16px;border-radius:12px;font-size:15px;font-weight:500;box-shadow:var(--shadow-raised);z-index:20}
 @media (prefers-reduced-motion:no-preference){.bar>i{transition:width .4s ease}}
 #printArea{display:none}
+.stat b{white-space:nowrap;font-size:clamp(1rem,4.8vw,1.45rem)!important;overflow:hidden;text-overflow:ellipsis}
 #fab{position:fixed;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));height:60px;min-height:60px;padding:0 22px 0 18px;border-radius:999px;border:0;background:var(--primary);color:var(--on-primary);font-size:16px;font-weight:700;display:inline-flex;align-items:center;gap:8px;box-shadow:var(--shadow-raised);z-index:15}
 #fab b{font-size:26px;line-height:1;font-weight:500}
 #sheet{position:fixed;inset:0;z-index:30;background:var(--scrim);display:flex;align-items:flex-end;justify-content:center}
@@ -630,6 +632,25 @@ function applyPlan(S, now, mkId) {
 }
 const planApplied = S => S.goals.some(g => g.tpl);
 // Kemajuan sasaran 2030 daripada data app.
+// Minimum sebulan untuk capai sasaran 2030 menjelang Dis 2030 (bulan semasa dikira).
+function planMinimum(S, today) {
+  const M = planMetrics(S), y = today.getFullYear();
+  const months = Math.max(1, (2030 - y) * 12 + (12 - (today.getMonth() + 1)) + 1);
+  const years = Math.max(1, 2030 - y);
+  const r2 = n => Math.round(n * 100) / 100, r3 = n => Math.round(n * 1000) / 1000;
+  // Guna baki di AWAL bulan (tolak simpanan bulan ini) supaya minimum bulan ini tidak berubah bila anda menyimpan.
+  const ms = monthlySaving(S, ym(today));
+  const g = r3(Math.max(0, M.emas.target - (M.emas.have - ms.g)) / months);
+  const price = Number(S.gold.price) || 0;
+  return {
+    months,
+    simpanan: r2(Math.max(0, M.simpanan.target - (M.simpanan.have - ms.rm)) / months),
+    emas: g, emasRM: price ? r2(g * price) : null,
+    gajiPct: M.gaji.have > 0 && M.gaji.have < M.gaji.target ? Math.round((Math.pow(M.gaji.target / M.gaji.have, 1 / years) - 1) * 1000) / 10 : 0,
+    gajiYears: years,
+    pasif: r2(Math.max(0, M.pasif.target - M.pasif.have) / months)
+  };
+}
 function planMetrics(S) {
   const inc = t => sum(S.incomes.filter(i => i.type === t), i => i.amount);
   return {
@@ -845,6 +866,7 @@ const planIsEmpty = S => LISTS.every(k => !S[k].length);
 </script>
 
 <script src="config.js"></script>
+<script src="i18n/en.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
 <script>
 "use strict";
@@ -858,7 +880,70 @@ const RM = n => isFinite(n) ? fmtRM.format(Math.round(n * 100) / 100 + 0).replac
 const fmtG = n => (Number(n) || 0).toLocaleString("ms-MY", { minimumFractionDigits: 0, maximumFractionDigits: 3 }) + " g";
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const BULAN = ["Jan","Feb","Mac","Apr","Mei","Jun","Jul","Ogo","Sep","Okt","Nov","Dis"];
+const MON_MS = ["Jan","Feb","Mac","Apr","Mei","Jun","Jul","Ogo","Sep","Okt","Nov","Dis"];
+const MON_EN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+/* ---------- bahasa (BM / English) & tema ---------- */
+// Teks UI ditulis dalam BM; dalam mod English, nod teks & atribut diterjemah selepas dipapar (i18n/en.js).
+// Data pengguna (kategori, nota, nama kad) tidak diterjemah kecuali sama dengan label UI.
+let LANG = (() => { try { return localStorage.getItem("pelan2030:lang") === "en" ? "en" : "ms"; } catch { return "ms"; } })();
+let BULAN = LANG === "en" ? MON_EN : MON_MS;
+const LOC = () => LANG === "en" ? "en-MY" : "ms-MY";
+const I18N_MON = /\b(?:Jan|Feb|Ma[cr]|Apr|Mei|May|Jun|Jul|Ogo|Aug|Sep|Okt|Oct|Nov|Dis|Dec)\b(?=\s*\d{4}|\s*,)|(?<=\d )(?:Jan|Feb|Ma[cr]|Apr|Mei|May|Jun|Jul|Ogo|Aug|Sep|Okt|Oct|Nov|Dis|Dec)\b/g;
+const I18N_NUM = /(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/g;
+const monEN = m => MON_EN[MON_MS.indexOf(m)] || m;
+let I18N_PHR = null;
+function trS(text, loose) {
+  if (LANG !== "en" || text == null || !window.I18N_EN) return text;
+  const s = String(text), core = s.replace(/\s+/g, " ").trim();
+  if (!core || !/[A-Za-z]/.test(core)) return s;
+  const D = window.I18N_EN, lead = /^\s/.test(s) ? " " : "", trail = /\s$/.test(s) ? " " : "";
+  if (D.exact[core] != null) return lead + D.exact[core] + trail;
+  const ms = [], ns = [];
+  const k = core.replace(I18N_MON, m => { ms.push(m); return "{m}"; }).replace(I18N_NUM, m => { ns.push(m); return "{n}"; });
+  if (D.exact[k] != null) { let i = 0, j = 0; return lead + D.exact[k].replace(/\{m\}/g, () => monEN(ms[i++])).replace(/\{n\}/g, () => ns[j++] ?? "") + trail; }
+  if (!I18N_PHR) I18N_PHR = D.phrases.slice().sort((a, b) => b[0].length - a[0].length);
+  let out = core;
+  for (const [a, b] of I18N_PHR) if ((loose || /[^A-Za-zÀ-ÿ]/.test(a)) && out.includes(a)) out = out.split(a).join(b);
+  out = out.replace(I18N_MON, monEN);
+  return out === core ? s : lead + out + trail;
+}
+function trText(n) {
+  const p = n.parentElement;
+  if (!p || /^(SCRIPT|STYLE|TEXTAREA)$/.test(p.tagName) || p.closest("[data-noi18n]")) return;
+  const v = trS(n.nodeValue);
+  if (v !== n.nodeValue) n.nodeValue = v;
+}
+function trNode(root) {
+  if (LANG !== "en" || !root) return;
+  if (root.nodeType === 3) return trText(root);
+  if (root.nodeType !== 1 || /^(SCRIPT|STYLE|TEXTAREA)$/.test(root.tagName)) return;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n; while ((n = w.nextNode())) trText(n);
+  for (const e of [root, ...root.querySelectorAll("[placeholder],[aria-label],[title]")])
+    for (const a of ["placeholder", "aria-label", "title"]) { const v = e.getAttribute && e.getAttribute(a); if (v) { const t = trS(v); if (t !== v) e.setAttribute(a, t); } }
+}
+new MutationObserver(muts => { if (LANG !== "en") return; for (const m of muts) m.addedNodes.forEach(trNode); })
+  .observe(document.documentElement, { childList: true, subtree: true });
+function setLang(l) {
+  LANG = l === "en" ? "en" : "ms"; BULAN = LANG === "en" ? MON_EN : MON_MS;
+  try { localStorage.setItem("pelan2030:lang", LANG); } catch {}
+  document.documentElement.lang = LANG; render();
+  if (LANG === "en") trNode(document.body); else location.reload();   // BM: muat semula supaya teks statik kembali asal
+}
+const curTheme = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+function setTheme(t) {
+  if (t === "auto") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  try { t === "auto" ? localStorage.removeItem("pelan2030:theme") : localStorage.setItem("pelan2030:theme", t); } catch {}
+  render();
+}
+// Butang kecil BM/EN & terang/gelap (dipapar di Ringkasan & Tetapan).
+function prefButtons(onHero) {
+  const st = onHero ? 'style="background:rgba(255,255,255,.16);color:inherit;border-color:rgba(255,255,255,.35)"' : "";
+  return `<div class="row" style="gap:6px" data-noi18n>
+    <button class="sm" data-act="lang" ${st} aria-label="${LANG === "en" ? "Tukar ke Bahasa Malaysia" : "Switch to English"}">${LANG === "en" ? "BM" : "EN"}</button>
+    <button class="sm" data-act="theme" ${st} aria-label="${curTheme() === "dark" ? (LANG === "en" ? "Light mode" : "Mod terang") : (LANG === "en" ? "Dark mode" : "Mod gelap")}">${curTheme() === "dark" ? "☀️" : "🌙"}</button>
+  </div>`;
+}
 const fmtYM = k => { const [y, m] = k.split("-"); return BULAN[+m - 1] + " " + y; };
 const fmtD = s => { const [y, m, d] = s.split("-"); return +d + " " + BULAN[+m - 1] + " " + y; };
 const today = () => new Date();
@@ -934,7 +1019,7 @@ function setSync(msg) {
   syncMsg = msg;
   for (const id of ["syncMsg", "syncMsg2"]) { const el = document.getElementById(id); if (el) el.textContent = msg; }
 }
-const jam = () => new Date().toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" });
+const jam = () => new Date().toLocaleTimeString(LOC(), { hour: "2-digit", minute: "2-digit" });
 function getBase(pid) { try { const b = JSON.parse(localStorage.getItem(BASEKEY)); return b && b.planId === pid ? b.data : null; } catch { return null; } }
 function setBase(pid, data) { try { localStorage.setItem(BASEKEY, JSON.stringify({ planId: pid, data })); } catch {} }
 function queuePush() {
@@ -1110,7 +1195,7 @@ function vNotifAuto() {
     <div class="row"><button class="primary" data-act="notifcopy">Salin alamat</button><button data-act="notiftest">Hantar ujian</button></div>
     <textarea id="notifUrlBox" hidden readonly rows="3" style="margin-top:8px;font:12px monospace"></textarea>
     <p class="small muted">Alamat ini mengandungi kod sambungan anda — jangan kongsi. Transaksi yang sama dari e-mel &amp; notifikasi hanya dicatat sekali. iPhone tidak membenarkan app lain membaca notifikasi; guna auto e-mel.</p>
-    ${notifLog.length ? `<h3 style="margin-top:12px">Log notifikasi terkini</h3><ul class="list">${notifLog.map(n => { const rr = RES[n.result] || ["", "Menunggu"]; return `<li style="padding:6px 0;align-items:flex-start"><div class="grow"><div class="small">${esc(String(n.body).slice(0, 110))}</div><div class="small muted">${n.app ? esc(n.app) + " · " : ""}${new Date(n.created_at).toLocaleString("ms-MY", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div></div><span class="pill ${rr[0]}">${rr[1]}</span></li>`; }).join("")}</ul>` : ""}
+    ${notifLog.length ? `<h3 style="margin-top:12px">Log notifikasi terkini</h3><ul class="list">${notifLog.map(n => { const rr = RES[n.result] || ["", "Menunggu"]; return `<li style="padding:6px 0;align-items:flex-start"><div class="grow"><div class="small">${esc(String(n.body).slice(0, 110))}</div><div class="small muted">${n.app ? esc(n.app) + " · " : ""}${new Date(n.created_at).toLocaleString(LOC(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div></div><span class="pill ${rr[0]}">${rr[1]}</span></li>`; }).join("")}</ul>` : ""}
   </section>`;
 }
 async function loadEmailToken() {
@@ -1216,14 +1301,14 @@ async function initCloud() {
 }
 function toast(msg) {
   document.querySelectorAll(".toast:not(.undo)").forEach(x => x.remove());
-  const el = document.createElement("div"); el.className = "toast"; el.role = "status"; el.textContent = msg;
+  const el = document.createElement("div"); el.className = "toast"; el.role = "status"; el.dataset.noi18n = ""; el.textContent = trS(msg, true);
   document.body.appendChild(el); setTimeout(() => el.remove(), 2200);
 }
 function toastUndo(msg, onUndo) {
   document.querySelectorAll(".toast").forEach(x => x.remove());
   const el = document.createElement("div"); el.className = "toast undo"; el.role = "status";
-  el.innerHTML = `<span></span><button type="button">Undo</button>`;
-  el.firstChild.textContent = msg;
+  el.innerHTML = `<span></span><button type="button">Undo</button>`; el.dataset.noi18n = "";
+  el.firstChild.textContent = trS(msg, true);
   el.querySelector("button").onclick = () => { el.remove(); onUndo(); };
   document.body.appendChild(el); setTimeout(() => el.remove(), 8000);
 }
@@ -1302,9 +1387,9 @@ function vRingkasan() {
   const em = emergencyCalc(S, t);
   return `
   <section class="card hero">
-    <p class="muted small" style="margin:0">Selamat datang${S.settings.name ? ", " + esc(S.settings.name) : ""}</p>
+    <div class="row between" style="align-items:flex-start"><p class="muted small" style="margin:0">Selamat datang${S.settings.name ? ", " + esc(S.settings.name) : ""}</p>${prefButtons(true)}</div>
     <div class="row between" style="align-items:flex-end">
-      <div><div class="big num">${days.toLocaleString("ms-MY")}</div><div class="muted">hari lagi hingga 31 Dis 2030</div></div>
+      <div><div class="big num">${days.toLocaleString(LOC())}</div><div class="muted">hari lagi hingga 31 Dis 2030</div></div>
     </div>
     <div class="small muted" style="margin-top:8px">${sbUser ? `☁ ${esc(sbUser.email)} · <span id="syncMsg2">${esc(syncMsg || "")}</span>` : `<button class="sm" data-tab="tetapan" style="background:rgba(255,255,255,.16);color:var(--on-primary);box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.5)">Log masuk untuk segerak antara telefon</button>`}
     </div>
@@ -1373,6 +1458,20 @@ function vRingkasan() {
     <p class="small muted">${em.stage === 3 ? "Kedua-dua stage tercapai 🎉" : em.stage === 1 ? `Stage 1 (ASB): ${RM(asbHave(S))} / ${RM(S.asb.s1)}` : `Stage 1 (ASB) ✓ · Stage 2 (Tabung Haji): ${RM(thHave(S))} / ${RM(S.th.target)}`}</p>
   </section>
 
+  ${(() => { const MIN = planMinimum(S, t), PM = planMetrics(S), ms = monthlySaving(S, ym(t));
+    const row = (label, val, sub, pct, cls) => `<li style="padding:8px 0;align-items:flex-start"><div class="grow"><div class="row between"><span>${label}</span><b class="num">${val}</b></div>${sub ? `<div class="small muted" style="margin-top:2px">${sub}</div>` : ""}${pct != null ? `<div style="margin-top:6px">${bar(pct, cls)}</div>` : ""}</div></li>`;
+    const done = (m) => m.target && m.have >= m.target;
+    return `<section class="card">
+    <div class="row between"><h2>Minimum sebulan</h2><button class="sm" data-tab="pelan">Pelan</button></div>
+    <p class="small muted" style="margin-top:-4px">Untuk capai sasaran 2030 · ${MIN.months} bulan lagi hingga Dis 2030</p>
+    <ul class="list">
+      ${row("Simpanan kecemasan", done(PM.simpanan) ? "Tercapai ✓" : RM(MIN.simpanan), done(PM.simpanan) ? "" : `Bulan ini ${RM(ms.rm)} / ${RM(MIN.simpanan)}`, done(PM.simpanan) ? null : Math.min(100, MIN.simpanan ? ms.rm / MIN.simpanan * 100 : 100), "amber")}
+      ${row("Emas", done(PM.emas) ? "Tercapai ✓" : fmtG(MIN.emas), done(PM.emas) ? "" : `Bulan ini ${fmtG(ms.g)} / ${fmtG(MIN.emas)}${MIN.emasRM != null ? ` · ≈ ${RM(MIN.emasRM)} sebulan` : ""}`, done(PM.emas) ? null : Math.min(100, MIN.emas ? ms.g / MIN.emas * 100 : 100), "gold")}
+      ${row("Gaji", done(PM.gaji) ? "Tercapai ✓" : (MIN.gajiPct ? `+${MIN.gajiPct}% setahun` : "—"), done(PM.gaji) ? "" : `${RM(PM.gaji.have)} → ${RM(PM.gaji.target)}`, null)}
+      ${row("Pendapatan pasif", done(PM.pasif) ? "Tercapai ✓" : `+${RM(MIN.pasif)} / bln`, done(PM.pasif) ? "" : `${RM(PM.pasif.have)} → ${RM(PM.pasif.target)} sebulan · hujung 2029: RM1,000–2,000`, null)}
+    </ul>
+  </section>`; })()}
+
   <section class="card">
     <h2>Langkah seterusnya</h2>
     ${nextSteps(c).map(s => `<p style="margin:.3rem 0">→ ${esc(s)}</p>`).join("") || `<p class="empty">Semua di landasan. Teruskan!</p>`}
@@ -1397,7 +1496,7 @@ const withMonthHeads = (rows, all, item) => rows.map((r, i) => {
 let reportMonth = ym(new Date());
 function reportHTML(r) {
   const R = n => "RM " + (Number(n) || 0).toLocaleString("ms-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const now = new Date().toLocaleString("ms-MY", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const now = new Date().toLocaleString(LOC(), { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const tbl = (head, body, foot = "") => `<table><thead><tr>${head.map(h => `<th class="${h.endsWith("(RM)") || h === "%" ? "r" : ""}">${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody>${foot}</table>`;
   const ok = b => b ? `<span class="ok">Sudah bayar</span>` : `<span class="bad">Belum bayar</span>`;
   return `<div class="rp">
@@ -1433,7 +1532,7 @@ function exportPDF() {
   if (!el) { el = document.createElement("div"); el.id = "printArea"; document.body.appendChild(el); }
   el.innerHTML = reportHTML(r);
   const oldTitle = document.title;
-  document.title = "Laporan-kewangan-" + reportMonth; // nama fail PDF lalai
+  document.title = (LANG === "en" ? "Financial-report-" : "Laporan-kewangan-") + reportMonth; // nama fail PDF lalai
   const done = () => { document.title = oldTitle; window.removeEventListener("afterprint", done); };
   window.addEventListener("afterprint", done);
   setTimeout(() => { window.print(); setTimeout(done, 1500); }, 50);
@@ -1479,7 +1578,7 @@ async function exportExcel(all) {
     if (!window.XLSX) { toast("Menyediakan Excel…"); await loadScript("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"); }
     const X = window.XLSX, wb = X.utils.book_new();
     for (const sh of sheets) {
-      const rows = sh.rows.map((r, ri) => r.map((v, ci) => (sh.dates || []).includes(ci) && ri > 0 && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T00:00:00") : v));
+      const rows = sh.rows.map((r, ri) => r.map((v, ci) => (sh.dates || []).includes(ci) && ri > 0 && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T00:00:00") : typeof v === "string" ? trS(v) : v));
       const ws = X.utils.aoa_to_sheet(rows, { cellDates: true });
       const rng = X.utils.decode_range(ws["!ref"] || "A1");
       for (let R = 1; R <= rng.e.r; R++) for (let C = 0; C <= rng.e.c; C++) {
@@ -1490,7 +1589,7 @@ async function exportExcel(all) {
         if (cell.t === "d") cell.z = "dd/mm/yyyy";
       }
       ws["!cols"] = (sh.cols || []).map(w => ({ wch: w }));
-      X.utils.book_append_sheet(wb, ws, sh.name);
+      X.utils.book_append_sheet(wb, ws, trS(sh.name).slice(0, 31));
     }
     X.writeFile(wb, fname);
     toast("Excel dimuat turun: " + fname);
@@ -1773,8 +1872,7 @@ function vPelan() {
   const yearPct = y => { const gs = S.goals.filter(g => +g.year === y); return gs.length ? gs.filter(g => g.done).length / gs.length * 100 : 0; };
   const curM = ym(t), ms = monthlySaving(S, curM);
   const started = curM >= PLAN_START;
-  const left = Math.max(1, (2030 - cy) * 12 + (12 - (t.getMonth() + 1)) + 1);
-  const needRM = Math.max(0, (M.simpanan.target - M.simpanan.have) / left), needG = Math.max(0, (M.emas.target - M.emas.have) / left);
+  const MIN = planMinimum(S, t), left = MIN.months, needRM = MIN.simpanan, needG = MIN.emas;
   const rv = nextReview(S, t);
   const showOld = !planApplied(S);
   return `
@@ -1801,9 +1899,14 @@ function vPelan() {
 
   <section class="card">
     <h2>Sasaran 2030</h2>
-    ${[["Pendapatan pasif", M.pasif, "sebulan", ""], ["Gaji", M.gaji, "sebulan", ""], ["Simpanan kecemasan", M.simpanan, "", ""], ["Simpanan emas", M.emas, "", "g"]].map(([l, m, per, u]) => {
+    ${[["Pendapatan pasif", M.pasif, "sebulan", "", M.pasif.have >= M.pasif.target ? "" : `Tambah ±<b>${RM(MIN.pasif)}</b> pendapatan pasif setiap bulan · hujung 2029: RM1,000–2,000`],
+       ["Gaji", M.gaji, "sebulan", "", MIN.gajiPct ? `Perlu naik ±<b>${MIN.gajiPct}% setahun</b> (${MIN.gajiYears} tahun lagi)` : ""],
+       ["Simpanan kecemasan", M.simpanan, "", "", MIN.simpanan ? `Minimum <b>${RM(MIN.simpanan)} sebulan</b> · pelan RM625` : ""],
+       ["Simpanan emas", M.emas, "", "g", MIN.emas ? `Minimum <b>${fmtG(MIN.emas)} sebulan</b>${MIN.emasRM != null ? ` ≈ ${RM(MIN.emasRM)}` : ""} · pelan 0.6–0.7 g` : ""]].map(([l, m, per, u, mn]) => {
       const pct = m.target ? Math.min(100, m.have / m.target * 100) : 0;
-      return `<div style="margin-top:10px"><div class="row between small"><span>${l}</span><span>${u ? fmtG(m.have) + " / " + fmtG(m.target) : RM(m.have) + " / " + RM(m.target)}${per ? " " + per : ""} · ${pct.toFixed(0)}%</span></div>${bar(pct, u ? "gold" : "")}</div>`; }).join("")}
+      return `<div style="margin-top:12px"><div class="row between small"><span>${l}</span><span>${u ? fmtG(m.have) + " / " + fmtG(m.target) : RM(m.have) + " / " + RM(m.target)}${per ? " " + per : ""} · ${pct.toFixed(0)}%</span></div>${bar(pct, u ? "gold" : "")}
+        <div class="small ${pct >= 100 ? "pos" : "muted"}" style="margin-top:4px">${pct >= 100 ? "Tercapai ✓" : mn}</div></div>`; }).join("")}
+    <p class="small muted" style="margin-top:10px">Minimum dikira untuk ${MIN.months} bulan lagi hingga Dis 2030 dan dikemas kini setiap kali anda rekod simpanan.${MIN.emasRM == null ? " Isi <b>Harga semasa RM/gram</b> (Kewangan → Sasaran emas) untuk nilai emas dalam RM." : ""}</p>
     <p class="small muted" style="margin-top:10px">Hujung 2029: pendapatan pasif RM1,000–RM2,000 sebulan (${RM(M.pasif.have)} sekarang). Pasif & gaji diambil dari <b>Sumber pendapatan</b> (jenis pasif / aktif).</p>
   </section>
 
@@ -1971,7 +2074,7 @@ async function scanLost() {
     if (plan) {
       try {
         const { data } = await sb.from("plan_history").select("data, saved_at").eq("plan_id", plan.id).order("id", { ascending: false }).limit(100);
-        for (const h of data || []) snaps.push({ label: "sejarah awan " + new Date(h.saved_at).toLocaleString("ms-MY", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }), data: h.data });
+        for (const h of data || []) snaps.push({ label: "sejarah awan " + new Date(h.saved_at).toLocaleString(LOC(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }), data: h.data });
       } catch {}
     }
   }
@@ -1979,7 +2082,7 @@ async function scanLost() {
 }
 function vTrash() {
   const items = Object.entries(S.trash).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
-  const fmtAt = ms => new Date(ms).toLocaleString("ms-MY", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fmtAt = ms => new Date(ms).toLocaleString(LOC(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   return `<section class="card" id="tongSampah">
     <div class="row between"><h2>Item terpadam</h2>${items.length ? `<button class="ghost sm" data-act="emptytrash">Kosongkan</button>` : ""}</div>
     <p class="small muted">Item yang dipadam disimpan di sini selama 30 hari dan boleh dipulihkan.</p>
@@ -1992,7 +2095,15 @@ function vTrash() {
 }
 
 function vTetapan() {
+  const th = document.documentElement.dataset.theme || "auto";
   return `
+  <section class="card">
+    <h2>Paparan</h2>
+    <div class="small muted" style="margin-bottom:6px">Bahasa</div>
+    <div class="seg" data-noi18n><button type="button" data-act="lang" data-v="ms" aria-pressed="${LANG === "ms"}">Bahasa Malaysia</button><button type="button" data-act="lang" data-v="en" aria-pressed="${LANG === "en"}">English</button></div>
+    <div class="small muted" style="margin:12px 0 6px">Tema</div>
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr"><button type="button" data-act="theme" data-v="light" aria-pressed="${th === "light"}">☀️ Terang</button><button type="button" data-act="theme" data-v="dark" aria-pressed="${th === "dark"}">🌙 Gelap</button><button type="button" data-act="theme" data-v="auto" aria-pressed="${th === "auto"}">Ikut sistem</button></div>
+  </section>
   ${vCloud()}
   ${vEmailAuto()}
   ${vNotifAuto()}
@@ -2223,7 +2334,7 @@ document.addEventListener("click", e => {
   const b = e.target.closest("button[data-act]"); if (!b) return;
   const { act, id } = b.dataset;
   switch (act) {
-    case "del": if (confirm(b.dataset.list === "cards" ? "Padam kad ini dan semua rekod penggunaannya?" : "Padam item ini?")) {
+    case "del": if (confirm(trS(b.dataset.list === "cards" ? "Padam kad ini dan semua rekod penggunaannya?" : "Padam item ini?", true))) {
       const list = b.dataset.list, now = Date.now();
       const linked = list === "deposits" ? S.tx.filter(t => t.link === "dep:" + id).map(t => t.id) : [];
       if (trashItem(S, list, id, now)) {
@@ -2263,18 +2374,20 @@ document.addEventListener("click", e => {
       break;
     }
     case "pdf": exportPDF(); break;
+    case "lang": setLang(b.dataset.v || (LANG === "en" ? "ms" : "en")); break;
+    case "theme": setTheme(b.dataset.v || (curTheme() === "dark" ? "light" : "dark")); break;
     case "emailtok": makeEmailToken(); break;
     case "emailcopy": copyEmailScript(); break;
     case "notifcopy": copyText(notifURL(), "Alamat disalin ✓ — tampal dalam MacroDroid (Permintaan HTTP → URL)"); break;
     case "notiftest": testNotif(); break;
-    case "emailrevoke": if (confirm("Batalkan kod? Skrip Gmail yang sedia ada akan berhenti mencatat.")) revokeEmailToken(); break;
+    case "emailrevoke": if (confirm(trS("Batalkan kod? Skrip Gmail yang sedia ada akan berhenti mencatat.", true))) revokeEmailToken(); break;
     case "quick": openQuick("out"); break;
     case "xlsx": exportExcel(false); break;
     case "xlsxall": exportExcel(true); break;
     case "budgetquick": if (!S.budgets.some(x => catKey(x.cat) === catKey(b.dataset.cat))) { S.budgets.push({ id: uid(), cat: b.dataset.cat, amount: num(b.dataset.amt) }); commit(); toast("Bajet " + b.dataset.cat + " ditetapkan " + RM(num(b.dataset.amt)) + " — ubah jika perlu"); } break;
     case "depall": depShowAll[b.dataset.key] = !depShowAll[b.dataset.key]; render(); break;
     case "restore1": if (restoreItem(S, id)) { commit(); toast("Dipulihkan"); } break;
-    case "emptytrash": if (confirm("Kosongkan tong sampah? Item di dalamnya tidak boleh dipulihkan lagi.")) { S.trash = {}; commit(); } break;
+    case "emptytrash": if (confirm(trS("Kosongkan tong sampah? Item di dalamnya tidak boleh dipulihkan lagi.", true))) { S.trash = {}; commit(); } break;
     case "scanlost": scanLost(); break;
     case "restorelost": {
       const f = lostFound.find(x => String(x.item.id) === id);
@@ -2288,15 +2401,15 @@ document.addEventListener("click", e => {
     }
     case "restore": document.getElementById("restoreFile").click(); break;
     case "sync": syncNow(); break;
-    case "rmmember": if (confirm("Buang " + b.dataset.email + " daripada pelan ini?")) removeMember(b.dataset.email); break;
-    case "leaveplan": if (confirm("Keluar dari pelan dikongsi? Anda akan guna salinan sendiri selepas ini.")) leavePlan(); break;
+    case "rmmember": if (confirm(trS("Buang " + b.dataset.email + " daripada pelan ini?", true))) removeMember(b.dataset.email); break;
+    case "leaveplan": if (confirm(trS("Keluar dari pelan dikongsi? Anda akan guna salinan sendiri selepas ini.", true))) leavePlan(); break;
     case "notifyon": enableNotify(); break;
     case "notifyoff": S.settings.notify = false; commit(); toast("Notifikasi dimatikan"); break;
     case "testnotify": testNotify(); break;
     case "ics": downloadICS(); break;
     case "install": if (installEvt) { installEvt.prompt(); installEvt.userChoice.finally(() => { installEvt = null; render(); }); } break;
     case "logout": sb.auth.signOut().then(() => { sbUser = null; plan = null; members = []; if (channel) { sb.removeChannel(channel); channel = null; } setSync(""); render(); toast("Telah log keluar. Data kekal dalam peranti ini."); }); break;
-    case "wipe": if (confirm(sbUser ? "Padam SEMUA data, termasuk di awan (semua ahli pelan dikongsi akan terkesan)? Tindakan ini tidak boleh diundur." : "Padam SEMUA data? Tindakan ini tidak boleh diundur.") && confirm("Pasti? Muat turun sandaran dahulu jika perlu.")) { const snap = JSON.parse(JSON.stringify(S)); S = normalize(null); commit(); toastUndo("Semua data dipadam", () => { S = normalize(snap); commit(); toast("Semua data dipulihkan"); }); } break;
+    case "wipe": if (confirm(trS(sbUser ? "Padam SEMUA data, termasuk di awan (semua ahli pelan dikongsi akan terkesan)? Tindakan ini tidak boleh diundur." : "Padam SEMUA data? Tindakan ini tidak boleh diundur.", true)) && confirm(trS("Pasti? Muat turun sandaran dahulu jika perlu.", true))) { const snap = JSON.parse(JSON.stringify(S)); S = normalize(null); commit(); toastUndo("Semua data dipadam", () => { S = normalize(snap); commit(); toast("Semua data dipulihkan"); }); } break;
   }
 });
 
@@ -2305,7 +2418,7 @@ document.addEventListener("change", e => {
   if (el.id === "restoreFile" && el.files[0]) {
     el.files[0].text().then(txt => {
       const d = JSON.parse(txt);
-      if (!confirm("Ganti data semasa dengan sandaran ini?")) return;
+      if (!confirm(trS("Ganti data semasa dengan sandaran ini?", true))) return;
       S = normalize(d); commit(); toast("Sandaran dipulihkan");
     }).catch(() => toast("Fail sandaran tidak sah")).finally(() => { el.value = ""; });
     return;
@@ -2327,6 +2440,7 @@ document.addEventListener("change", e => {
 
 window.addEventListener("storage", e => { if (e.key === KEY) { S = load(); render(); } });
 render();
+trNode(document.body);
 initCloud();
 { const q = new URLSearchParams(location.search).get("tambah");
   if (q === "keluar" || q === "masuk") { openQuick(q === "masuk" ? "in" : "out"); history.replaceState(null, "", location.pathname); } }

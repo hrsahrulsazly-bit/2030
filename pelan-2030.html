@@ -456,14 +456,25 @@ function yearSummary(S, year, today, month) {
   const cardUsed = Math.round((sum(cardSpend, t => t.amount) + sum(S.tx.filter(t => t.type === "out" && inY(t) && isCardTx(t)), t => t.amount)) * 100) / 100;
   const cardPaid = Math.round((sum(S.cardTx.filter(t => t.type === "bayar" && inY(t)), t => t.amount)) * 100) / 100;
   const cardUnpaid = Math.round(sum(S.cards, c => cardCalc(S, c, today).balance) * 100) / 100;
-  return { income, expected, spent, pending, balance, projected: balance + expected - pending, byCat, months: months.size,
+  const catOf = (rows) => { const o = {}; for (const t of rows) { const c = String(t.cat || "Lain-lain").trim() || "Lain-lain"; o[c] = (o[c] || 0) + (Number(t.amount) || 0); } return o; };
+  const byCatCash = catOf(S.tx.filter(t => t.type === "out" && inY(t) && !isCardTx(t)));
+  const byCatCard = catOf([...cardSpend, ...S.tx.filter(t => t.type === "out" && inY(t) && isCardTx(t))]);
+  return { byCatCash, byCatCard, income, expected, spent, pending, balance, projected: balance + expected - pending, byCat, months: months.size,
     cash, cashOut: Math.round(cashOut * 100) / 100, cashProjected: Math.round((cash + expected - pending) * 100) / 100, cardUsed, cardPaid, cardUnpaid };
 }
 
 // Aliran sebulan, sama definisi dengan ringkasan: masuk = transaksi Masuk; keluar = transaksi Keluar
 // (kecuali bayaran bil kad) + belanja kad kredit.
-function monthFlow(S, m) {
+// mode "tunai": keluar = tx Keluar bukan belian kad (termasuk bayaran bil kad);
+// mode "kad": in = bayaran kad, out = belanja kad (cardTx + tx isCardTx).
+function monthFlow(S, m, mode) {
   const inM = t => pk(S, t.date) === m;
+  if (mode === "tunai") return { m,
+    in: sum(S.tx.filter(t => t.type === "in" && inM(t)), t => t.amount),
+    out: sum(S.tx.filter(t => t.type === "out" && inM(t) && !isCardTx(t)), t => t.amount) };
+  if (mode === "kad") return { m,
+    in: sum(S.cardTx.filter(t => t.type === "bayar" && inM(t)), t => t.amount),
+    out: sum(S.cardTx.filter(t => t.type === "belanja" && inM(t)), t => t.amount) + sum(S.tx.filter(t => t.type === "out" && inM(t) && isCardTx(t)), t => t.amount) };
   return {
     m,
     in: sum(S.tx.filter(t => t.type === "in" && inM(t)), t => t.amount),
@@ -508,14 +519,17 @@ function nextDue(dueDay, today) {
 }
 
 // Data laporan bulanan (m = "YYYY-MM"). Definisi sama dengan ringkasan: bayaran bil kad tidak dikira dalam Keluar.
-function monthReport(S, m, today) {
+// mode: "" semua, "tunai" (tx bukan belian kad; bil kad DIKIRA keluar), "kad" (belanja kad + bayaran kad).
+function monthReport(S, m, today, mode = "") {
   const inM = t => pk(S, t.date) === m;
   const cardNm = id => (S.cards.find(c => c.id === id) || { name: "(kad dipadam)" }).name;
-  const flow = monthFlow(S, m);
+  const flow = monthFlow(S, m, mode);
+  const txRows = S.tx.filter(t => inM(t) && (!mode || (mode === "kad" ? t.type === "out" && isCardTx(t) : !isCardTx(t))));
   const rows = [
-    ...S.tx.filter(inM).map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: t.type, amount: Number(t.amount) || 0,
-      via: t.type === "in" ? "" : t.cat === "Kad kredit" ? "Bayar bil kad" : "Tunai / debit", bill: t.type === "out" && t.cat === "Kad kredit" })),
-    ...S.cardTx.filter(t => t.type === "belanja" && inM(t)).map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: "out", amount: Number(t.amount) || 0, via: "Kad " + cardNm(t.cardId), bill: false }))
+    ...txRows.map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: t.type, amount: Number(t.amount) || 0,
+      via: t.type === "in" ? "" : t.cat === "Kad kredit" ? "Bayar bil kad" : isCardTx(t) ? "Kad kredit" : "Tunai / debit", bill: mode !== "tunai" && t.type === "out" && t.cat === "Kad kredit" })),
+    ...(mode === "tunai" ? [] : S.cardTx.filter(t => t.type === "belanja" && inM(t)).map(t => ({ date: t.date, cat: t.cat, note: t.note || "", type: "out", amount: Number(t.amount) || 0, via: "Kad " + cardNm(t.cardId), bill: false }))),
+    ...(mode === "kad" ? S.cardTx.filter(t => t.type === "bayar" && inM(t)).map(t => ({ date: t.date, cat: "Bayaran kad", note: t.note || "", type: "in", amount: Number(t.amount) || 0, via: "Kad " + cardNm(t.cardId), bill: false })) : [])
   ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const byCatObj = {};
   for (const r of rows) if (r.type === "out" && !r.bill) { const c = String(r.cat || "Lain-lain").trim() || "Lain-lain"; byCatObj[c] = (byCatObj[c] || 0) + r.amount; }
@@ -528,7 +542,9 @@ function monthReport(S, m, today) {
     return { name: c.name, spend: sum(t.filter(x => x.type === "belanja"), x => x.amount), paid: sum(t.filter(x => x.type === "bayar"), x => x.amount), balance: k.balance, limit: k.limit, util: k.util };
   });
   const c = calc(S), e = emergencyCalc(S, today);
-  return { m, in: flow.in, out: flow.out, net: flow.in - flow.out, byCat, rows, commitments, debts, cards,
+  return { m, mode, in: flow.in, out: flow.out, net: flow.in - flow.out, byCat, rows, commitments, debts, cards: mode === "tunai" ? [] : cards,
+    cardUnpaid: Math.round(sum(S.cards, c => cardCalc(S, c, today).balance) * 100) / 100,
+    budgetMode: mode ? budgetStatus(S, m, mode) : null,
     committed: c.out, dsr: c.dsr, dsrLevel: c.dsrLevel,
     emergency: { asb: asbHave(S), asbTarget: Number(S.asb.s1) || 0, th: thHave(S), thTarget: Number(S.th.target) || 0, stage: e.stage },
     gold: { have: goldHave(S), target: Number(S.gold.target) || 0 },
@@ -611,15 +627,16 @@ const fmtYMx = k => { const B = ["Jan","Feb","Mac","Apr","Mei","Jun","Jul","Ogo"
 // Bajet: kategori dipadankan tanpa kira huruf besar/kecil & ruang. Belanja = definisi sama dengan ringkasan
 // (tx Keluar kecuali "Kad kredit" + belanja kad).
 const catKey = c => String(c || "Lain-lain").trim().replace(/\s+/g, " ").toLowerCase();
-function spendByCat(S, m) {
+// mode: "" = semua, "tunai" = tx Keluar bukan belian kad, "kad" = belanja kad (cardTx + tx isCardTx).
+function spendByCat(S, m, mode) {
   const out = {};
   const add = (cat, amt) => { const k = catKey(cat); if (!out[k]) out[k] = { label: String(cat || "Lain-lain").trim() || "Lain-lain", amount: 0 }; out[k].amount += Number(amt) || 0; };
-  for (const t of S.tx) if (t.type === "out" && t.cat !== "Kad kredit" && pk(S, t.date) === m) add(t.cat, t.amount);
-  for (const t of S.cardTx) if (t.type === "belanja" && pk(S, t.date) === m) add(t.cat, t.amount);
+  for (const t of S.tx) if (t.type === "out" && t.cat !== "Kad kredit" && pk(S, t.date) === m && (!mode || (mode === "kad") === isCardTx(t))) add(t.cat, t.amount);
+  if (mode !== "tunai") for (const t of S.cardTx) if (t.type === "belanja" && pk(S, t.date) === m) add(t.cat, t.amount);
   return out;
 }
-function budgetStatus(S, m) {
-  const sp = spendByCat(S, m);
+function budgetStatus(S, m, mode) {
+  const sp = spendByCat(S, m, mode);
   const rows = S.budgets.map(b => {
     const amount = Number(b.amount) || 0, spent = Math.round(((sp[catKey(b.cat)] || {}).amount || 0) * 100) / 100;
     const pct = amount > 0 ? spent / amount * 100 : spent > 0 ? Infinity : 0;
@@ -1074,9 +1091,9 @@ const today = () => new Date();
 
 let S = load();
 let tab = (() => { try { return localStorage.getItem(KEY + ":tab") || "ringkasan"; } catch { return "ringkasan"; } })();
-let txMonth = pkNow(S, today());
-let trendSel = "6";
-let sumYear = new Date().getFullYear(), sumMonth = "";
+let txMonth = pkNow(S, today()), txPay = "", budgetPay = "", reportPay = "";
+let trendSel = "6", trendPay = "";
+let sumYear = new Date().getFullYear(), sumMonth = "", sumPay = "";
 
 function load() {
   try { return normalize(JSON.parse(localStorage.getItem(KEY))); } catch { return normalize(null); }
@@ -1457,19 +1474,19 @@ const stat = (label, val, cls = "") => `<div class="stat"><span>${label}</span><
 const del = (list, id) => `<button class="ghost sm" data-act="del" data-list="${list}" data-id="${id}" aria-label="Padam">✕</button>`;
 const dsrPill = c => `<span class="pill ${c.dsrLevel === "sihat" ? "ok" : c.dsrLevel === "tinggi" ? "bad" : "warn"}">DSR ${isFinite(c.dsr) ? c.dsr.toFixed(0) + "%" : "—"} · ${c.dsrLevel}</span>`;
 
-function chart(data) {
+function chart(data, L = ["Masuk", "Keluar"]) {
   const W = 320, H = 140, P = 22, max = Math.max(1, ...data.flatMap(d => [d.in, d.out]));
   const bw = (W - P) / data.length;
   const bars = data.map((d, i) => {
     const x = P + i * bw, hi = (d.in / max) * (H - 30), ho = (d.out / max) * (H - 30);
-    return `<rect x="${x + bw * .12}" y="${H - 18 - hi}" width="${bw * .36}" height="${hi}" rx="2" fill="var(--teal)"><title>${fmtYM(d.m)} masuk ${RM(d.in)}</title></rect>
-      <rect x="${x + bw * .52}" y="${H - 18 - ho}" width="${bw * .36}" height="${ho}" rx="2" fill="var(--red)"><title>${fmtYM(d.m)} keluar ${RM(d.out)}</title></rect>
+    return `<rect x="${x + bw * .12}" y="${H - 18 - hi}" width="${bw * .36}" height="${hi}" rx="2" fill="var(--teal)"><title>${fmtYM(d.m)} ${L[0].toLowerCase()} ${RM(d.in)}</title></rect>
+      <rect x="${x + bw * .52}" y="${H - 18 - ho}" width="${bw * .36}" height="${ho}" rx="2" fill="var(--red)"><title>${fmtYM(d.m)} ${L[1].toLowerCase()} ${RM(d.out)}</title></rect>
       <text x="${x + bw / 2}" y="${H - 5}" text-anchor="middle">${BULAN[+d.m.slice(5) - 1]}</text>`;
   }).join("");
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Graf aliran tunai">
     <line x1="${P}" x2="${W}" y1="${H - 18}" y2="${H - 18}" stroke="var(--line)"/>
     <text x="0" y="12">${RM(max)}</text>${bars}</svg>
-    <div class="row small muted"><span><span style="color:var(--teal)">■</span> Masuk</span><span><span style="color:var(--red)">■</span> Keluar</span></div>`;
+    <div class="row small muted"><span><span style="color:var(--teal)">■</span> ${L[0]}</span><span><span style="color:var(--red)">■</span> ${L[1]}</span></div>`;
 }
 
 function nextSteps(c) {
@@ -1502,7 +1519,7 @@ function vRingkasan() {
   if (sumMonth && (!sumYear || sumMonth.slice(0, 4) !== String(sumYear))) sumMonth = "";
   const ys = yearSummary(S, sumYear, t, sumMonth);
   const curP = pkNow(S, t);
-  const tdata = trendMonths(trendSel, new Date(+curP.slice(0, 4), +curP.slice(5, 7) - 1, 1)).map(m => monthFlow(S, m));
+  const tdata = trendMonths(trendSel, new Date(+curP.slice(0, 4), +curP.slice(5, 7) - 1, 1)).map(m => monthFlow(S, m, trendPay));
   const rngTxt = (() => {
     if (sumMonth) { const r = periodRange(S, sumMonth); return `${fmtD(r.from)} – ${fmtD(r.to)}`; }
     if (sumYear && mStart(S) > 1) { const a = periodRange(S, sumYear + "-01"), z = periodRange(S, sumYear + "-12"); return `${fmtD(a.from)} – ${fmtD(z.to)}`; }
@@ -1536,14 +1553,24 @@ function vRingkasan() {
     </div>
     ${rngTxt ? `<div class="small muted" style="margin:0 0 4px">${rngTxt}</div>` : ""}
     <div class="row between small muted" style="margin:0 0 8px"><span>${sumMonth ? "" : ys.months + " bulan direkod"}</span>${dsrPill(c)}</div>
-    <div class="grid3">
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr;margin:0 0 10px">${[["", "Semua"], ["tunai", "Tunai"], ["kad", "Kad kredit"]].map(([k, l]) => `<button type="button" data-act="sumpay" data-v="${k}" aria-pressed="${sumPay === k}" style="padding:4px 2px;white-space:nowrap">${l}</button>`).join("")}</div>
+    ${sumPay === "tunai" ? `<div class="grid3">
+      <div class="stat"><span>Pendapatan diterima</span><b>${RM(ys.income)}</b>${ys.expected ? `<span>+ ${RM(ys.expected)} dijangka bulan ini (belum direkod)</span>` : ""}</div>
+      <div class="stat"><span>Keluar tunai</span><b class="${ys.cashOut ? "neg" : ""}">${RM(ys.cashOut)}</b><span>${ys.pending ? `+ ${RM(ys.pending)} komitmen bulan ini belum bayar` : "Termasuk bayaran bil kad"}</span></div>
+      <div class="stat"><span>Baki tunai</span><b class="${ys.cash >= 0 ? "pos" : "neg"}">${RM(ys.cash)}</b><span>${ys.expected || ys.pending ? `Dijangka hujung bulan: ${RM(ys.cashProjected)}` : "Belanja kad belum bayar tidak ditolak"}</span></div>
+    </div>` : sumPay === "kad" ? `<div class="grid3">
+      <div class="stat"><span>Guna kad kredit</span><b class="${ys.cardUsed ? "neg" : ""}">${RM(ys.cardUsed)}</b></div>
+      <div class="stat"><span>Bayaran kad</span><b class="${ys.cardPaid ? "pos" : ""}">${RM(ys.cardPaid)}</b></div>
+      <div class="stat"><span>Belum bayar sekarang</span><b class="${ys.cardUnpaid ? "neg" : "pos"}">${RM(ys.cardUnpaid)}</b><span>${ys.cardUnpaid ? "Baki semua kad" : S.cards.length ? "Semua kad sudah dibayar" : "Tiada kad direkod"}</span></div>
+    </div>` : `<div class="grid3">
       <div class="stat"><span>Pendapatan diterima</span><b>${RM(ys.income)}</b>${ys.expected ? `<span>+ ${RM(ys.expected)} dijangka bulan ini (belum direkod)</span>` : ""}</div>
       <div class="stat"><span>Duit keluar</span><b class="${ys.spent ? "neg" : ""}">${RM(ys.spent)}</b>${ys.pending ? `<span>+ ${RM(ys.pending)} komitmen bulan ini belum bayar</span>` : ""}</div>
       <div class="stat"><span>Baki tunai</span><b class="${ys.cash >= 0 ? "pos" : "neg"}">${RM(ys.cash)}</b><span>${ys.expected || ys.pending ? `Dijangka hujung bulan: ${RM(ys.cashProjected)}` : "Belanja kad belum bayar tidak ditolak"}</span></div>
       <div class="stat"><span>Guna kad kredit</span><b class="${ys.cardUsed ? "neg" : ""}">${RM(ys.cardUsed)}</b><span>${ys.cardUnpaid ? `Belum bayar sekarang ${RM(ys.cardUnpaid)}` : S.cards.length ? "Semua kad sudah dibayar" : "Tiada kad direkod"}</span></div>
-    </div>
-    ${Object.keys(ys.byCat).length ? `<h3 style="margin-top:14px">Duit keluar ikut kategori</h3>
-    <ul class="list">${Object.entries(ys.byCat).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<li style="padding:6px 0"><div class="grow">${escW(n)}<div class="bar" style="margin-top:4px;height:6px"><i style="width:${(v / ys.spent * 100).toFixed(1)}%;background:var(--red)"></i></div></div><span class="num">${RM(v)}</span></li>`).join("")}</ul>` : `<p class="empty">Tiada duit keluar direkod${sumYear ? " untuk " + sumYear : ""}.</p>`}
+    </div>`}
+    ${(() => { const bc = sumPay === "tunai" ? ys.byCatCash : sumPay === "kad" ? ys.byCatCard : ys.byCat, tot = sum(Object.values(bc), v => v) || 1;
+      return Object.keys(bc).length ? `<h3 style="margin-top:14px">${sumPay === "tunai" ? "Keluar tunai ikut kategori" : sumPay === "kad" ? "Belanja kad ikut kategori" : "Duit keluar ikut kategori"}</h3>
+    <ul class="list">${Object.entries(bc).sort((a, b) => b[1] - a[1]).map(([n, v]) => `<li style="padding:6px 0"><div class="grow">${escW(n)}<div class="bar" style="margin-top:4px;height:6px"><i style="width:${(v / tot * 100).toFixed(1)}%;background:var(--red)"></i></div></div><span class="num">${RM(v)}</span></li>`).join("")}</ul>` : `<p class="empty">${sumPay === "kad" ? "Tiada belanja kad" : "Tiada duit keluar"} direkod${sumYear ? " untuk " + sumYear : ""}.</p>`; })()}
     <h3 style="margin-top:14px">Campuran pendapatan</h3>
     <div class="mix" aria-hidden="true">${["aktif", "sampingan", "pasif"].map(k => `<i style="width:${c.mix[k] / mixT * 100}%;background:${MIXC[k]}"></i>`).join("")}</div>
     <div class="row small" style="margin-top:6px">${["aktif", "sampingan", "pasif"].map(k => `<span><span style="color:${MIXC[k]}">■</span> ${k[0].toUpperCase() + k.slice(1)} ${RM(c.mix[k])}</span>`).join("")}</div>
@@ -1580,8 +1607,10 @@ function vRingkasan() {
         <option value="12" ${trendSel === "12" ? "selected" : ""}>12 bulan terakhir</option>
         ${years.map(y => `<option value="${y}" ${trendSel === String(y) ? "selected" : ""}>Tahun ${y}</option>`).join("")}
       </select></div>
-    ${chart(tdata)}
-    <p class="small muted" style="margin:.4rem 0 0">Jumlah: masuk ${RM(sum(tdata, d => d.in))} · keluar ${RM(sum(tdata, d => d.out))}</p>
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr;margin:6px 0 8px">${[["", "Semua"], ["tunai", "Tunai"], ["kad", "Kad kredit"]].map(([k, l]) => `<button type="button" data-act="trendpay" data-v="${k}" aria-pressed="${trendPay === k}" style="padding:4px 2px;white-space:nowrap">${l}</button>`).join("")}</div>
+    ${(() => { const L = trendPay === "kad" ? ["Bayaran kad", "Belanja kad"] : trendPay === "tunai" ? ["Masuk", "Keluar tunai"] : ["Masuk", "Keluar"];
+      return `${chart(tdata, L)}
+    <p class="small muted" style="margin:.4rem 0 0">Jumlah: ${L[0].toLowerCase()} ${RM(sum(tdata, d => d.in))} · ${L[1].toLowerCase()} ${RM(sum(tdata, d => d.out))}</p>`; })()}
   </section>
 
   <section class="card">
@@ -1636,18 +1665,21 @@ function reportHTML(r) {
   const tbl = (head, body, foot = "") => `<table><thead><tr>${head.map(h => `<th class="${h.endsWith("(RM)") || h === "%" ? "r" : ""}">${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody>${foot}</table>`;
   const ok = b => b ? `<span class="ok">Sudah bayar</span>` : `<span class="bad">Belum bayar</span>`;
   return `<div class="rp">
-  <header><div><h1>Laporan kewangan bulanan</h1><div class="sub">${fmtYM(r.m)}${S.settings.name ? " · " + esc(S.settings.name) : ""}</div></div><div class="brand">Pelan 2030</div></header>
-  <div class="kpi">
+  <header><div><h1>Laporan kewangan bulanan</h1><div class="sub">${fmtYM(r.m)}${r.mode === "tunai" ? " · Tunai sahaja" : r.mode === "kad" ? " · Kad kredit sahaja" : ""}${S.settings.name ? " · " + esc(S.settings.name) : ""}</div></div><div class="brand">Pelan 2030</div></header>
+  <div class="kpi">${r.mode === "kad" ? `
+    <div><span>Belanja kad</span><b class="neg">${R(r.out)}</b></div>
+    <div><span>Bayaran kad</span><b class="pos">${R(r.in)}</b></div>
+    <div><span>Belum bayar sekarang</span><b class="${r.cardUnpaid > 0 ? "neg" : "pos"}">${R(r.cardUnpaid)}</b></div>` : `
     <div><span>Masuk</span><b class="pos">${R(r.in)}</b></div>
-    <div><span>Keluar</span><b class="neg">${R(r.out)}</b></div>
-    <div><span>Bersih</span><b class="${r.net >= 0 ? "pos" : "neg"}">${R(r.net)}</b></div>
+    <div><span>${r.mode === "tunai" ? "Keluar tunai" : "Keluar"}</span><b class="neg">${R(r.out)}</b></div>
+    <div><span>${r.mode === "tunai" ? "Baki tunai" : "Bersih"}</span><b class="${r.net >= 0 ? "pos" : "neg"}">${R(r.net)}</b></div>`}
     <div><span>DSR</span><b>${isFinite(r.dsr) ? r.dsr.toFixed(0) + "%" : "—"}</b><small>${r.dsrLevel}</small></div>
   </div>
-  <h2>Duit keluar ikut kategori</h2>
+  <h2>${r.mode === "tunai" ? "Keluar tunai ikut kategori" : r.mode === "kad" ? "Belanja kad ikut kategori" : "Duit keluar ikut kategori"}</h2>
   ${r.byCat.length ? tbl(["Kategori", "%", "Jumlah (RM)"], r.byCat.map(c => `<tr><td>${esc(c.cat)}<div class="bar"><i style="width:${c.pct.toFixed(1)}%"></i></div></td><td class="r">${c.pct.toFixed(0)}%</td><td class="r">${R(c.amount)}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td></td><td class="r">${R(r.out)}</td></tr></tfoot>`) : `<p class="muted">Tiada duit keluar.</p>`}
-  ${r.budget && r.budget.rows.length ? `<h2>Bajet vs belanja</h2>${tbl(["Kategori", "Bajet (RM)", "Belanja (RM)", "Baki (RM)", "%"], r.budget.rows.map(b => `<tr><td>${esc(b.cat)}</td><td class="r">${R(b.amount)}</td><td class="r">${R(b.spent)}</td><td class="r ${b.left < 0 ? "neg" : "pos"}">${R(b.left)}</td><td class="r">${isFinite(b.pct) ? b.pct.toFixed(0) + "%" : "—"}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td class="r">${R(r.budget.budget)}</td><td class="r">${R(r.budget.spent)}</td><td class="r">${R(r.budget.budget - r.budget.spent)}</td><td class="r">${r.budget.pct.toFixed(0)}%</td></tr></tfoot>`)}${r.budget.unbudgetedTotal ? `<p class="note">Belanja tanpa bajet: ${R(r.budget.unbudgetedTotal)}</p>` : ""}` : ""}
+  ${r.budget && r.budget.rows.length ? `<h2>Bajet vs belanja</h2>${tbl(["Kategori", "Bajet (RM)", ...(r.mode ? [r.mode === "kad" ? "Kad (RM)" : "Tunai (RM)"] : []), "Belanja (RM)", "Baki (RM)", "%"], r.budget.rows.map(b => `<tr><td>${esc(b.cat)}</td><td class="r">${R(b.amount)}</td>${r.mode ? `<td class="r">${R((r.budgetMode.rows.find(x => x.id === b.id) || {}).spent)}</td>` : ""}<td class="r">${R(b.spent)}</td><td class="r ${b.left < 0 ? "neg" : "pos"}">${R(b.left)}</td><td class="r">${isFinite(b.pct) ? b.pct.toFixed(0) + "%" : "—"}</td></tr>`).join(""), `<tfoot><tr><td>Jumlah</td><td class="r">${R(r.budget.budget)}</td>${r.mode ? `<td class="r">${R(r.budgetMode.spent)}</td>` : ""}<td class="r">${R(r.budget.spent)}</td><td class="r">${R(r.budget.budget - r.budget.spent)}</td><td class="r">${r.budget.pct.toFixed(0)}%</td></tr></tfoot>`)}${r.budget.unbudgetedTotal ? `<p class="note">Belanja tanpa bajet: ${R(r.budget.unbudgetedTotal)}</p>` : ""}${r.mode ? `<p class="note">Belanja & Baki = semua cara bayar; lajur ${r.mode === "kad" ? "Kad" : "Tunai"} = bahagian ${r.mode === "kad" ? "kad kredit" : "tunai"} sahaja.</p>` : ""}` : ""}
   <h2>Senarai transaksi (${r.rows.length})</h2>
-  ${r.rows.length ? tbl(["Tarikh", "Kategori", "Nota", "Cara bayar", "Jumlah (RM)"], r.rows.map(x => `<tr class="${x.bill ? "muted" : ""}"><td>${fmtD(x.date)}</td><td>${esc(x.cat)}</td><td>${esc(x.note)}</td><td>${esc(x.via)}</td><td class="r ${x.type === "in" ? "pos" : x.bill ? "" : "neg"}">${x.type === "in" ? "+" : "−"}${R(x.amount)}</td></tr>`).join("")) + (r.rows.some(x => x.bill) ? `<p class="note">Baris kelabu = bayaran bil kad kredit; tidak dikira dalam Keluar kerana belanja kad sudah dikira.</p>` : "") : `<p class="muted">Tiada transaksi.</p>`}
+  ${r.rows.length ? tbl(["Tarikh", "Kategori", "Nota", "Cara bayar", "Jumlah (RM)"], r.rows.map(x => `<tr class="${x.bill ? "muted" : ""}"><td>${fmtD(x.date)}</td><td>${esc(x.cat)}</td><td>${esc(x.note)}</td><td>${esc(x.via)}</td><td class="r ${x.type === "in" ? "pos" : x.bill ? "" : "neg"}">${x.type === "in" ? "+" : "−"}${R(x.amount)}</td></tr>`).join("")) + (r.mode === "tunai" && r.rows.some(x => x.cat === "Kad kredit" && x.type === "out") ? `<p class="note">Bayaran bil kad kredit ditolak dari tunai.</p>` : "") + (r.rows.some(x => x.bill) ? `<p class="note">Baris kelabu = bayaran bil kad kredit; tidak dikira dalam Keluar kerana belanja kad sudah dikira.</p>` : "") : `<p class="muted">Tiada transaksi.</p>`}
   ${r.cards.length ? `<h2>Kad kredit</h2>${tbl(["Kad", "Belanja bulan ini (RM)", "Dibayar bulan ini (RM)", "Baki semasa (RM)", "%"], r.cards.map(c => `<tr><td>${esc(c.name)}</td><td class="r">${R(c.spend)}</td><td class="r">${R(c.paid)}</td><td class="r ${c.balance > 0 ? "neg" : "pos"}">${R(c.balance)}</td><td class="r">${c.util.toFixed(0)}%</td></tr>`).join(""))}<p class="note">% = penggunaan had kredit.</p>` : ""}
   ${r.commitments.length || r.debts.length ? `<h2>Komitmen & hutang (${R(r.committed)} sebulan)</h2>${tbl(["Perkara", "Hari bayar", "Status", "Jumlah (RM)"],
       r.commitments.map(c => `<tr><td>${esc(c.name)}</td><td>${c.day || "—"}</td><td>${ok(c.paid)}</td><td class="r">${R(c.amount)}</td></tr>`).join("")
@@ -1663,12 +1695,12 @@ function reportHTML(r) {
   </div>`;
 }
 function exportPDF() {
-  const r = monthReport(S, reportMonth, today());
+  const r = monthReport(S, reportMonth, today(), reportPay);
   let el = document.getElementById("printArea");
   if (!el) { el = document.createElement("div"); el.id = "printArea"; document.body.appendChild(el); }
   el.innerHTML = reportHTML(r);
   const oldTitle = document.title;
-  document.title = (LANG === "en" ? "Financial-report-" : "Laporan-kewangan-") + reportMonth; // nama fail PDF lalai
+  document.title = (LANG === "en" ? "Financial-report-" : "Laporan-kewangan-") + reportMonth + (reportPay === "tunai" ? (LANG === "en" ? "-cash" : "-tunai") : reportPay === "kad" ? (LANG === "en" ? "-card" : "-kad") : ""); // nama fail PDF lalai
   const done = () => { document.title = oldTitle; window.removeEventListener("afterprint", done); };
   window.addEventListener("afterprint", done);
   setTimeout(() => { window.print(); setTimeout(done, 1500); }, 50);
@@ -1746,23 +1778,26 @@ function budgetBar(r) {
   return `<div class="bar ${cls}" role="progressbar" aria-valuenow="${Math.round(Math.min(r.pct, 999))}" aria-valuemin="0" aria-valuemax="100"><i style="width:${Math.min(100, r.pct)}%;background:${col}"></i></div>`;
 }
 function vBudget() {
-  const b = budgetStatus(S, budgetMonth);
+  const b = budgetStatus(S, budgetMonth), P = budgetPay, bm = P ? budgetStatus(S, budgetMonth, P) : b;
+  const pL = P === "kad" ? "kad kredit" : "tunai", mOf = id => (bm.rows.find(x => x.id === id) || { spent: 0 }).spent;
   const cats = [...new Set([...BUDGET_CATS, ...S.tx.filter(t => t.type === "out" && t.cat !== "Kad kredit").map(t => t.cat), ...S.cardTx.filter(t => t.type === "belanja").map(t => t.cat)].filter(Boolean).map(c => String(c).trim()))];
   const pillB = r => r.level === "lebih" ? `<span class="pill bad">Lebih ${RM(-r.left)}</span>` : r.level === "hampir" ? `<span class="pill warn">Baki ${RM(r.left)}</span>` : `<span class="pill ok">Baki ${RM(r.left)}</span>`;
   return `<section class="card" id="bajet">
     <div class="row between"><h2>Bajet bulanan</h2>${monthSelect("budgetmonth", budgetMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace(/<option value="" (selected)?>Semua bulan<\/option>/, "")}</div>
-    ${S.budgets.length ? `<div class="row between small" style="margin-top:4px"><span>Belanja ${RM(b.spent)} / bajet ${RM(b.budget)}</span><span>${b.pct.toFixed(0)}%</span></div>
-    ${budgetBar({ pct: b.pct, level: b.pct > 100 ? "lebih" : b.pct >= 80 ? "hampir" : "ok" })}
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr;margin:6px 0 8px">${[["", "Semua"], ["tunai", "Tunai"], ["kad", "Kad kredit"]].map(([k, l]) => `<button type="button" data-act="budgetpay" data-v="${k}" aria-pressed="${P === k}" style="padding:4px 2px;white-space:nowrap">${l}</button>`).join("")}</div>
+    ${P && S.budgets.length ? `<p class="small muted" style="margin:0 0 4px">Bar menunjukkan belanja ${pL} sahaja; baki bajet tetap dikira daripada semua belanja.</p>` : ""}
+    ${S.budgets.length ? `<div class="row between small" style="margin-top:4px"><span>${P ? `Belanja ${pL} ${RM(bm.spent)} · jumlah ${RM(b.spent)}` : `Belanja ${RM(b.spent)}`} / bajet ${RM(b.budget)}</span><span>${(P ? bm.pct : b.pct).toFixed(0)}%</span></div>
+    ${budgetBar({ pct: P ? bm.pct : b.pct, level: b.pct > 100 ? "lebih" : b.pct >= 80 ? "hampir" : "ok" })}
     <ul class="list" style="margin-top:8px">${b.rows.map(r => `<li style="display:block">
         <div style="display:flex;gap:8px;align-items:center">
           <div class="grow" style="flex:1;min-width:0;font-weight:600">${escW(r.cat)}</div>
           <input type="number" inputmode="decimal" step="0.01" min="0" value="${r.amount}" data-act="budgetamt" data-id="${r.id}" aria-label="Bajet ${esc(r.cat)}" style="width:112px;flex:none;padding-left:10px;padding-right:8px">
           ${del("budgets", r.id)}
         </div>
-        <div class="row between small" style="margin:6px 0 6px;gap:6px"><span class="muted">${RM(r.spent)} / ${RM(r.amount)} · ${isFinite(r.pct) ? r.pct.toFixed(0) + "%" : "—"}</span>${pillB(r)}</div>
-        ${budgetBar(r)}
+        <div class="row between small" style="margin:6px 0 6px;gap:6px"><span class="muted">${P ? `${P === "kad" ? "Kad" : "Tunai"} ${RM(mOf(r.id))} · jumlah ` : ""}${RM(r.spent)} / ${RM(r.amount)} · ${isFinite(r.pct) ? r.pct.toFixed(0) + "%" : "—"}</span>${pillB(r)}</div>
+        ${budgetBar(P ? { ...r, pct: r.amount > 0 ? mOf(r.id) / r.amount * 100 : 0 } : r)}
       </li>`).join("")}</ul>` : `<p class="empty">Belum ada bajet. Tetapkan had sebulan bagi setiap kategori — belanja tunai dan kad kredit dikira automatik.</p>`}
-    ${b.unbudgeted.length ? `<p class="small muted" style="margin:10px 0 4px">Belanja tanpa bajet: <b>${RM(b.unbudgetedTotal)}</b> — ${b.unbudgeted.slice(0, 6).map(u => `<button class="ghost sm" data-act="budgetquick" data-cat="${esc(u.cat)}" data-amt="${Math.ceil(u.spent / 10) * 10}" title="Tambah bajet">${esc(u.cat)} ${RM(u.spent)} ＋</button>`).join(" ")}</p>` : ""}
+    ${bm.unbudgeted.length ? `<p class="small muted" style="margin:10px 0 4px">Belanja ${P ? pL + " " : ""}tanpa bajet: <b>${RM(bm.unbudgetedTotal)}</b> — ${bm.unbudgeted.slice(0, 6).map(u => `<button class="ghost sm" data-act="budgetquick" data-cat="${esc(u.cat)}" data-amt="${Math.ceil(u.spent / 10) * 10}" title="Tambah bajet">${esc(u.cat)} ${RM(u.spent)} ＋</button>`).join(" ")}</p>` : ""}
     <form class="add" data-form="budget">
       <label>Kategori<input name="cat" list="budgetcats" required placeholder="cth. Makan"></label>
       <label>Bajet sebulan (RM)<input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" required></label>
@@ -1785,10 +1820,13 @@ function vKewangan() {
   const inSel = x => !txMonth || pk(S, x.date) === txMonth;
   const alloc = Object.assign({}, ...S.cards.map(c => cardAlloc(S, c.id)));
   const cardRows = S.cardTx.filter(x => x.type === "belanja" && inSel(x)).map(x => ({ ...x, _card: true }));
-  const rows = [...S.tx.filter(inSel), ...cardRows].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const byCard = r => r._card || isCardTx(r);
+  const allRows = [...S.tx.filter(inSel), ...cardRows];
+  const rows = allRows.filter(r => !txPay || (txPay === "kad") === byCard(r)).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const payCount = k => allRows.filter(r => !k || (k === "kad") === byCard(r)).length;
   const isBill = r => !r._card && r.type === "out" && r.cat === "Kad kredit";
   const tin = sum(rows.filter(r => !r._card && r.type === "in"), r => r.amount);
-  const tout = sum(rows.filter(r => r._card || (r.type === "out" && !isBill(r))), r => r.amount);
+  const tout = sum(rows.filter(r => r._card || (r.type === "out" && (txPay === "tunai" || !isBill(r)))), r => r.amount);
   const gs = savCalc(goldHave(S), S.gold.target, S.gold.by, t);
   const { s1, s2, stage } = emergencyCalc(S, t);
   const stLine = (sv, label) => sv.need ? `Perlu ${RM(sv.need)} lagi · ${isFinite(sv.perMonth) ? RM(sv.perMonth) + " sebulan" : "tarikh sasaran sudah lepas"}` : label + " tercapai ✓";
@@ -1797,6 +1835,8 @@ function vKewangan() {
   <section class="card">
     <h2>Laporan & eksport</h2>
     <p class="small muted"><b>PDF</b>: laporan sebulan (dalam dialog cetak pilih <b>Simpan sebagai PDF</b>). <b>Excel</b>: fail .xlsx dengan helaian Ringkasan, Transaksi, Kad kredit, Simpanan dan Komitmen & hutang.</p>
+    <div class="small muted" style="margin:0 0 4px">Laporan PDF untuk:</div>
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr;margin:0 0 8px">${[["", "Semua"], ["tunai", "Tunai"], ["kad", "Kad kredit"]].map(([k, l]) => `<button type="button" data-act="reportpay" data-v="${k}" aria-pressed="${reportPay === k}" style="padding:4px 2px;white-space:nowrap">${l}</button>`).join("")}</div>
     <div class="row">${monthSelect("reportmonth", reportMonth, [...S.tx, ...S.cardTx].map(t => t.date)).replace('<option value="" selected>Semua bulan</option>', "").replace('<option value="" >Semua bulan</option>', "")}<button class="primary" data-act="pdf">Eksport PDF</button><button data-act="xlsx">Eksport Excel</button></div>
     <button class="ghost sm" data-act="xlsxall" style="margin-top:6px">Excel semua data</button>
   </section>
@@ -1816,12 +1856,14 @@ function vKewangan() {
 
   <section class="card">
     <div class="row between"><h2>Transaksi</h2>${monthSelect("txmonth", txMonth, [...S.tx, ...S.cardTx].map(t => t.date))}</div>
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr;margin:0 0 8px">${[["", "Semua"], ["tunai", "Tunai"], ["kad", "Kad kredit"]].map(([k, l]) => `<button type="button" data-act="txpay" data-v="${k}" aria-pressed="${txPay === k}" style="line-height:1.15;padding:4px 2px;white-space:nowrap">${l}<span class="small" style="display:block;font-weight:400">${payCount(k)} transaksi</span></button>`).join("")}</div>
     ${txMonth ? "" : `<p class="small muted" style="margin:0 0 6px">Semua bulan · ${rows.length} transaksi</p>`}
-    <div class="grid3">${stat("Masuk", RM(tin), "pos")}${stat("Keluar", RM(tout), "neg")}${stat("Bersih", RM(tin - tout), tin - tout >= 0 ? "pos" : "neg")}</div>
+    ${txPay === "kad" ? `<div class="grid2">${stat("Belanja kad", RM(tout), "neg")}${stat("Belum bayar", RM(sum(rows.filter(r => r._card), r => { const a = alloc[r.id]; return a ? a.owed || 0 : 0; })), "neg")}</div>`
+      : `<div class="grid3">${stat("Masuk", RM(tin), "pos")}${stat("Keluar", RM(tout), "neg")}${stat(txPay ? "Baki tunai" : "Bersih", RM(tin - tout), tin - tout >= 0 ? "pos" : "neg")}</div>`}
     ${rows.length ? `<ul class="list" style="margin-top:8px">${withMonthHeads(rows, !txMonth, r => r._card
       ? `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)} · 💳 ${esc(cardName(r.cardId))}</div><div style="margin-top:4px">${payPill(alloc[r.id])}</div></div>
       <span class="num neg">−${RM(r.amount)}</span>${del("cardTx", r.id)}</li>`
-      : `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}${isBill(r) ? " · bayar bil kad (tidak dikira dalam Keluar)" : ""}</div></div>
+      : `<li><div class="grow"><div>${esc(r.cat)}${r.note ? ` <span class="muted small">· ${esc(r.note)}</span>` : ""}</div><div class="small muted">${fmtD(r.date)}${isBill(r) ? (txPay === "tunai" ? " · bayar bil kad (ditolak dari tunai)" : " · bayar bil kad (tidak dikira dalam Keluar)") : ""}</div></div>
       <span class="num ${r.type === "in" ? "pos" : isBill(r) ? "muted" : "neg"}">${r.type === "in" ? "+" : "−"}${RM(r.amount)}</span>${del("tx", r.id)}</li>`)}</ul>` : `<p class="empty">${txMonth ? "Tiada transaksi untuk " + fmtYM(txMonth) : "Belum ada transaksi"}.</p>`}
     <form class="add" data-form="tx">
       <label>Tarikh<input name="date" type="date" value="${ymd(t)}" required></label>
@@ -2623,6 +2665,11 @@ document.addEventListener("click", e => {
       toastUndo(`${P.tx.length} transaksi audit diimport`, () => { S.tx = S.tx.filter(t => !ids.has(t.id)); commit(); toast("Import dibatalkan"); });
       break;
     }
+    case "txpay": txPay = b.dataset.v; render(); break;
+    case "sumpay": sumPay = b.dataset.v; render(); break;
+    case "trendpay": trendPay = b.dataset.v; render(); break;
+    case "budgetpay": budgetPay = b.dataset.v; render(); break;
+    case "reportpay": reportPay = b.dataset.v; render(); break;
     case "lang": setLang(b.dataset.v || (LANG === "en" ? "ms" : "en")); break;
     case "theme": setTheme(b.dataset.v || (curTheme() === "dark" ? "light" : "dark")); break;
     case "emailtok": makeEmailToken(); break;
